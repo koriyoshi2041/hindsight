@@ -8,13 +8,17 @@ needing to re-import the module with custom env vars.
 
 import asyncio
 from contextlib import AsyncExitStack
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
+from openai import APIConnectionError
 
 from hindsight_api.engine import llm_wrapper
 from hindsight_api.engine.llm_wrapper import (
     LLMProvider,
+    _attempt_permits,
     _scope_to_operation,
     _semaphores_for_scope,
 )
@@ -200,6 +204,69 @@ class TestSemaphoreEnforcement:
             )
 
         assert peak == 2, f"retain cap should hold even for end-to-end calls, peak={peak}"
+
+    @pytest.mark.asyncio
+    async def test_retry_backoff_does_not_block_unrelated_call(self):
+        """A logical call must not own the global permit while it backs off."""
+        provider = LLMProvider(provider="openai", api_key="test", base_url="", model="test-model")
+        first_attempt_failed = asyncio.Event()
+        attempts = {"a": 0, "b": 0}
+
+        async def create(**kwargs):
+            call = kwargs["messages"][0]["content"]
+            attempts[call] += 1
+            if call == "a" and attempts[call] == 1:
+                first_attempt_failed.set()
+                raise APIConnectionError(request=httpx.Request("POST", "https://example.test"))
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=call), finish_reason="stop")],
+                usage=None,
+            )
+
+        provider._provider_impl._client.chat.completions.create = create
+        global_sem = asyncio.Semaphore(1)
+
+        with (
+            patch.object(llm_wrapper, "_global_llm_semaphore", global_sem),
+            patch.object(llm_wrapper, "_per_op_llm_semaphores", {}),
+        ):
+            call_a = asyncio.create_task(
+                provider.call(
+                    messages=[{"role": "user", "content": "a"}],
+                    scope="retain",
+                    max_retries=1,
+                    initial_backoff=0.2,
+                )
+            )
+            await asyncio.wait_for(first_attempt_failed.wait(), timeout=1)
+            call_b = asyncio.create_task(
+                provider.call(messages=[{"role": "user", "content": "b"}], scope="reflect", max_retries=0)
+            )
+
+            assert await asyncio.wait_for(call_b, timeout=0.1) == "b"
+            assert await call_a == "a"
+            assert attempts == {"a": 2, "b": 1}
+            assert global_sem._value == 1
+
+    @pytest.mark.asyncio
+    async def test_cancel_while_waiting_for_global_releases_per_op(self):
+        retain_sem = asyncio.Semaphore(1)
+        global_sem = asyncio.Semaphore(0)
+
+        with (
+            patch.object(llm_wrapper, "_global_llm_semaphore", global_sem),
+            patch.object(llm_wrapper, "_per_op_llm_semaphores", {"retain": retain_sem}),
+        ):
+            task = asyncio.create_task(_attempt_permits("retain").__aenter__())
+            while retain_sem._value != 0:
+                await asyncio.sleep(0)
+
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert retain_sem._value == 1
+        assert global_sem._value == 0
 
     @pytest.mark.asyncio
     async def test_per_op_composes_with_global(self):

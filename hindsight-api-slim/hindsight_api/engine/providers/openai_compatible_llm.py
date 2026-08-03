@@ -26,9 +26,10 @@ import logging
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 import httpx
@@ -52,6 +53,12 @@ from hindsight_api.metrics import get_metrics_collector
 from hindsight_api.worker.stage import set_stage
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _unlimited_attempt():
+    yield
+
 
 # Seed applied to every Groq request for deterministic behavior
 DEFAULT_LLM_SEED = 4242
@@ -769,6 +776,7 @@ class OpenAICompatibleLLM(LLMInterface):
         skip_validation: bool = False,
         strict_schema: bool = False,
         return_usage: bool = False,
+        attempt_context: Callable[[], Any] = _unlimited_attempt,
     ) -> Any:
         """
         Make an LLM API call with retry logic.
@@ -809,6 +817,7 @@ class OpenAICompatibleLLM(LLMInterface):
                 skip_validation=skip_validation,
                 scope=scope,
                 return_usage=return_usage,
+                attempt_context=attempt_context,
             )
 
         start_time = time.time()
@@ -905,7 +914,8 @@ class OpenAICompatibleLLM(LLMInterface):
             set_stage(f"llm.{self.provider}.{scope}.attempt={attempt + 1}/{max_retries + 1}")
             try:
                 if response_format is not None:
-                    response = await self._client.chat.completions.create(**call_params)
+                    async with attempt_context():
+                        response = await self._client.chat.completions.create(**call_params)
                     # Stash usage before parse/validate, which may raise locally
                     # even though the provider charged for these tokens (#2387).
                     stash_response_usage(_usage_from_openai_response(response))
@@ -961,7 +971,8 @@ class OpenAICompatibleLLM(LLMInterface):
                     else:
                         result = response_format.model_validate(json_data)
                 else:
-                    response = await self._client.chat.completions.create(**call_params)
+                    async with attempt_context():
+                        response = await self._client.chat.completions.create(**call_params)
                     stash_response_usage(_usage_from_openai_response(response))
                     result, first_choice = _content_or_error(
                         response,
@@ -1174,6 +1185,7 @@ class OpenAICompatibleLLM(LLMInterface):
         initial_backoff: float = 1.0,
         max_backoff: float = 30.0,
         tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
+        attempt_context: Callable[[], Any] = _unlimited_attempt,
     ) -> LLMToolCallResult:
         """
         Make an LLM API call with tool/function calling support.
@@ -1280,7 +1292,8 @@ class OpenAICompatibleLLM(LLMInterface):
         for attempt in range(max_retries + 1):
             set_stage(f"llm.{self.provider}.tools.attempt={attempt + 1}/{max_retries + 1}")
             try:
-                response = await self._client.chat.completions.create(**call_params)
+                async with attempt_context():
+                    response = await self._client.chat.completions.create(**call_params)
 
                 message = response.choices[0].message
                 finish_reason = response.choices[0].finish_reason
@@ -1428,6 +1441,7 @@ class OpenAICompatibleLLM(LLMInterface):
         skip_validation: bool,
         scope: str = "memory",
         return_usage: bool = False,
+        attempt_context: Callable[[], Any] = _unlimited_attempt,
     ) -> Any:
         """
         Call Ollama using native API with JSON schema enforcement.
@@ -1484,7 +1498,8 @@ class OpenAICompatibleLLM(LLMInterface):
             for attempt in range(max_retries + 1):
                 set_stage(f"llm.ollama_native.{scope}.attempt={attempt + 1}/{max_retries + 1}")
                 try:
-                    response = await client.post(native_url, json=payload, headers=headers)
+                    async with attempt_context():
+                        response = await client.post(native_url, json=payload, headers=headers)
                     response.raise_for_status()
 
                     result = response.json()

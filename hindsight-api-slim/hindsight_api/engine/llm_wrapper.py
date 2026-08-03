@@ -9,7 +9,7 @@ import os
 import re
 import time
 import uuid
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from json_repair import repair_json
@@ -105,6 +105,15 @@ def _semaphores_for_scope(scope: str) -> list[asyncio.Semaphore]:
     # Per-op acquired first so contention queues on the narrower cap before
     # holding a global slot.
     return [per_op, _global_llm_semaphore]
+
+
+@asynccontextmanager
+async def _attempt_permits(scope: str):
+    """Hold concurrency permits for one active upstream attempt."""
+    async with AsyncExitStack() as stack:
+        for sem in _semaphores_for_scope(scope):
+            await stack.enter_async_context(sem)
+        yield
 
 
 def _request_params(
@@ -951,9 +960,14 @@ class LLMProvider:
         # hand so the error path below can attach it if parsing/validation fails.
         usage_token = set_response_usage(None)
         try:
+            from .providers.openai_compatible_llm import OpenAICompatibleLLM
+
+            attempt_scoped = isinstance(self._provider_impl, OpenAICompatibleLLM)
             async with AsyncExitStack() as stack:
-                for sem in _semaphores_for_scope(scope):
-                    await stack.enter_async_context(sem)
+                if not attempt_scoped:
+                    for sem in _semaphores_for_scope(scope):
+                        await stack.enter_async_context(sem)
+                attempt_kwarg = {"attempt_context": lambda: _attempt_permits(scope)} if attempt_scoped else {}
                 set_stage(base_stage)
 
                 # cached_prefix is only set for providers that returned a handle
@@ -975,6 +989,7 @@ class LLMProvider:
                         skip_validation=skip_validation,
                         strict_schema=strict_schema,
                         return_usage=return_usage,
+                        **attempt_kwarg,
                         **cache_kwarg,
                     )
                 except Exception as e:
@@ -1087,9 +1102,14 @@ class LLMProvider:
         # hand so the error path below can attach it if parsing/validation fails.
         usage_token = set_response_usage(None)
         try:
+            from .providers.openai_compatible_llm import OpenAICompatibleLLM
+
+            attempt_scoped = isinstance(self._provider_impl, OpenAICompatibleLLM)
             async with AsyncExitStack() as stack:
-                for sem in _semaphores_for_scope(scope):
-                    await stack.enter_async_context(sem)
+                if not attempt_scoped:
+                    for sem in _semaphores_for_scope(scope):
+                        await stack.enter_async_context(sem)
+                attempt_kwarg = {"attempt_context": lambda: _attempt_permits(scope)} if attempt_scoped else {}
                 set_stage(base_stage)
 
                 # cached_prefix is only set for providers that returned a handle
@@ -1113,6 +1133,7 @@ class LLMProvider:
                         initial_backoff=initial_backoff,
                         max_backoff=max_backoff,
                         tool_choice=tool_choice,
+                        **attempt_kwarg,
                         **cache_kwarg,
                     )
                 except Exception as e:
