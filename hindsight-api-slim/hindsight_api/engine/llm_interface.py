@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Self
+from typing import Any, AsyncContextManager, Callable, Self
 
 from .response_models import LLMToolCallResult
 
@@ -112,6 +112,7 @@ class LLMInterface(ABC):
         strict_schema: bool = False,
         return_usage: bool = False,
         cached_prefix: str | None = None,
+        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
     ) -> Any:
         """
         Make an LLM API call with retry logic.
@@ -158,6 +159,7 @@ class LLMInterface(ABC):
         tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
         cached_prefix: str | None = None,
         cached_prefix_message_count: int = 0,
+        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
     ) -> LLMToolCallResult:
         """
         Make an LLM API call with tool/function calling support.
@@ -185,6 +187,10 @@ class LLMInterface(ABC):
         Returns:
             True if provider supports submit_batch/get_batch_status/retrieve_batch_results
         """
+        return False
+
+    def supports_attempt_scoped_concurrency(self) -> bool:
+        """Whether retries can acquire concurrency permits per upstream attempt."""
         return False
 
     # ── Prompt prefix caching (optional, per-provider) ─────────────────────────

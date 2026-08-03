@@ -9,7 +9,7 @@ import os
 import re
 import time
 import uuid
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from json_repair import repair_json
@@ -105,6 +105,15 @@ def _semaphores_for_scope(scope: str) -> list[asyncio.Semaphore]:
     # Per-op acquired first so contention queues on the narrower cap before
     # holding a global slot.
     return [per_op, _global_llm_semaphore]
+
+
+@asynccontextmanager
+async def _attempt_permits(scope: str):
+    """Hold configured LLM concurrency permits for one upstream attempt."""
+    async with AsyncExitStack() as stack:
+        for sem in _semaphores_for_scope(scope):
+            await stack.enter_async_context(sem)
+        yield
 
 
 def _request_params(
@@ -951,9 +960,13 @@ class LLMProvider:
         # hand so the error path below can attach it if parsing/validation fails.
         usage_token = set_response_usage(None)
         try:
+            # Providers that own retry loops acquire the shared permits for each
+            # upstream attempt so backoff never occupies request capacity.
+            attempt_gated = self._provider_impl.supports_attempt_scoped_concurrency()
             async with AsyncExitStack() as stack:
-                for sem in _semaphores_for_scope(scope):
-                    await stack.enter_async_context(sem)
+                if not attempt_gated:
+                    for sem in _semaphores_for_scope(scope):
+                        await stack.enter_async_context(sem)
                 set_stage(base_stage)
 
                 # cached_prefix is only set for providers that returned a handle
@@ -963,6 +976,7 @@ class LLMProvider:
                 cache_kwarg = {"cached_prefix": cached_prefix} if cached_prefix is not None else {}
                 try:
                     # Delegate to provider implementation
+                    attempt_kwarg = {"attempt_context": lambda: _attempt_permits(scope)} if attempt_gated else {}
                     result = await self._provider_impl.call(
                         messages=messages,
                         response_format=response_format,
@@ -976,6 +990,7 @@ class LLMProvider:
                         strict_schema=strict_schema,
                         return_usage=return_usage,
                         **cache_kwarg,
+                        **attempt_kwarg,
                     )
                 except Exception as e:
                     # The provider call may have succeeded (and incurred token
@@ -1087,9 +1102,11 @@ class LLMProvider:
         # hand so the error path below can attach it if parsing/validation fails.
         usage_token = set_response_usage(None)
         try:
+            attempt_gated = self._provider_impl.supports_attempt_scoped_concurrency()
             async with AsyncExitStack() as stack:
-                for sem in _semaphores_for_scope(scope):
-                    await stack.enter_async_context(sem)
+                if not attempt_gated:
+                    for sem in _semaphores_for_scope(scope):
+                        await stack.enter_async_context(sem)
                 set_stage(base_stage)
 
                 # cached_prefix is only set for providers that returned a handle
@@ -1103,6 +1120,7 @@ class LLMProvider:
                 )
                 try:
                     # Delegate to provider implementation
+                    attempt_kwarg = {"attempt_context": lambda: _attempt_permits(scope)} if attempt_gated else {}
                     result = await self._provider_impl.call_with_tools(
                         messages=messages,
                         tools=tools,
@@ -1114,6 +1132,7 @@ class LLMProvider:
                         max_backoff=max_backoff,
                         tool_choice=tool_choice,
                         **cache_kwarg,
+                        **attempt_kwarg,
                     )
                 except Exception as e:
                     # The provider call may have succeeded (and incurred token

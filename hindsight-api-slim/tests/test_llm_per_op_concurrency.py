@@ -202,6 +202,46 @@ class TestSemaphoreEnforcement:
         assert peak == 2, f"retain cap should hold even for end-to-end calls, peak={peak}"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_tools", [False, True])
+    async def test_unrelated_call_can_run_while_retrying_call_backs_off(self, with_tools):
+        """A logical call's retry sleep must not occupy the global permit."""
+        provider = LLMProvider(provider="openai", api_key="test", base_url="", model="test-model")
+        entered_backoff = asyncio.Event()
+        release_backoff = asyncio.Event()
+        unrelated_started = asyncio.Event()
+
+        async def retrying_mock_call(**kwargs):
+            content = kwargs["messages"][0]["content"]
+            attempt_context = kwargs["attempt_context"]
+            async with attempt_context():
+                if content != "retrying":
+                    unrelated_started.set()
+            if content == "retrying":
+                entered_backoff.set()
+                await release_backoff.wait()
+            return "ok"
+
+        method = "call_with_tools" if with_tools else "call"
+        setattr(provider._provider_impl, method, retrying_mock_call)
+
+        async def invoke(content):
+            kwargs = {"messages": [{"role": "user", "content": content}], "scope": "retain"}
+            if with_tools:
+                kwargs["tools"] = []
+                return await provider.call_with_tools(**kwargs)
+            return await provider.call(**kwargs)
+
+        with patch.object(llm_wrapper, "_global_llm_semaphore", asyncio.Semaphore(1)):
+            retrying = asyncio.create_task(invoke("retrying"))
+            await asyncio.wait_for(entered_backoff.wait(), timeout=1)
+            unrelated = asyncio.create_task(invoke("unrelated"))
+            try:
+                await asyncio.wait_for(unrelated_started.wait(), timeout=0.1)
+            finally:
+                release_backoff.set()
+                await asyncio.gather(retrying, unrelated)
+
+    @pytest.mark.asyncio
     async def test_per_op_composes_with_global(self):
         """When both caps are set, the tighter one wins on its operation but
         the global cap still constrains the sum across operations."""
