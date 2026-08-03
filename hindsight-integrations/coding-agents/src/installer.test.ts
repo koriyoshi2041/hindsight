@@ -85,6 +85,19 @@ describe("claude-code installer", () => {
     }
   });
 
+  it("removes before adding so an existing registration is REPOINTED, not skipped", () => {
+    const ctx = makeCtx();
+    run(["install", "claude-code"], ctx);
+    const calls = ctx.claudeMcp.mock.calls.map((c) => c[0]);
+    const removeAt = calls.findIndex((a) => a[1] === "remove");
+    const addAt = calls.findIndex((a) => a[1] === "add");
+    // `claude mcp add` refuses a name that already exists, so without the remove a re-install
+    // silently leaves a stale (possibly dead) server path registered.
+    expect(removeAt).toBeGreaterThanOrEqual(0);
+    expect(removeAt).toBeLessThan(addAt);
+    expect(calls[removeAt]).toEqual(["mcp", "remove", "--scope", "user", "hindsight"]);
+  });
+
   it("registers the MCP server via `claude mcp add` (user scope)", () => {
     const ctx = makeCtx();
     run(["install", "claude-code"], ctx);
@@ -230,6 +243,27 @@ describe("cline-cli installer", () => {
 });
 
 describe("antigravity-cli installer", () => {
+  it("removes a namespace written under a PREVIOUS marker instead of leaving both live", () => {
+    const ctx = makeCtx();
+    const hooksPath = join(ctx.home, ".gemini", "config", "hooks.json");
+    // Exactly what a marker rename produced: our old namespace, still pointing at a stale path.
+    writeJsonAt(hooksPath, {
+      "hindsight-coding-agents": {
+        PreInvocation: [{ command: 'node "/old/path/coding-agents/dist/antigravity-hook.js"' }],
+      },
+      "someone-elses-bundle": { PreInvocation: [{ command: "echo other" }] },
+    });
+    run(["install", "antigravity-cli"], ctx);
+
+    const hooks = readJson(hooksPath);
+    // The stale namespace is gone — otherwise Antigravity fires every hook twice.
+    expect(hooks["hindsight-coding-agents"]).toBeUndefined();
+    expect(hooks[MARKER]).toBeDefined();
+    expect(JSON.stringify(hooks)).not.toContain("/old/path/");
+    // An unrelated bundle is untouched.
+    expect(hooks["someone-elses-bundle"]).toBeDefined();
+  });
+
   const hooksPath = (ctx: InstallCtx) => join(ctx.home, ".gemini", "config", "hooks.json");
   const mcpPath = (ctx: InstallCtx) => join(ctx.home, ".gemini", "config", "mcp_config.json");
   const settingsPath = (ctx: InstallCtx) =>
@@ -548,6 +582,48 @@ describe("run() CLI behavior", () => {
       "grok-build",
       "cline-cli",
     ]);
+  });
+});
+
+/**
+ * `all` is an explicit target rather than the default for a bare command: wiring every detected
+ * agent rewrites a lot of a machine's config and should not happen by accident.
+ */
+describe("all vs named harnesses", () => {
+  it("`install all` wires every DETECTED agent", () => {
+    const ctx = makeCtx();
+    mkdirSync(join(ctx.home, ".claude"), { recursive: true });
+    mkdirSync(join(ctx.home, ".codex"), { recursive: true });
+    expect(run(["install", "all"], ctx)).toBe(0);
+    expect(existsSync(join(ctx.home, ".claude", "settings.json"))).toBe(true);
+    expect(existsSync(join(ctx.home, ".codex", "hooks.json"))).toBe(true);
+  });
+
+  it("a bare `install` changes NOTHING and explains the choice", () => {
+    const ctx = makeCtx();
+    const logs: string[] = [];
+    ctx.log = (m) => logs.push(m);
+    mkdirSync(join(ctx.home, ".claude"), { recursive: true });
+    expect(run(["install"], ctx)).toBe(1);
+    expect(existsSync(join(ctx.home, ".claude", "settings.json"))).toBe(false);
+    expect(logs.join("\n")).toContain("all");
+  });
+
+  it("a named harness wires only that one", () => {
+    const ctx = makeCtx();
+    mkdirSync(join(ctx.home, ".claude"), { recursive: true });
+    mkdirSync(join(ctx.home, ".codex"), { recursive: true });
+    run(["install", "claude-code"], ctx);
+    expect(existsSync(join(ctx.home, ".claude", "settings.json"))).toBe(true);
+    expect(existsSync(join(ctx.home, ".codex", "hooks.json"))).toBe(false);
+  });
+
+  it("`uninstall all` is accepted too, so the pair stays symmetric", () => {
+    const ctx = makeCtx();
+    mkdirSync(join(ctx.home, ".claude"), { recursive: true });
+    run(["install", "all"], ctx);
+    expect(run(["uninstall", "all"], ctx)).toBe(0);
+    expect(readJson(join(ctx.home, ".claude", "settings.json")).hooks).toBeUndefined();
   });
 });
 
