@@ -119,7 +119,12 @@ The control center runs as a separate process from the memory daemon. Stopping o
 | `HINDSIGHT_API_LLM_PROVIDER` | LLM provider: `openai`, `anthropic`, `gemini`, `groq`, `minimax`, `ollama` | `openai` |
 | `HINDSIGHT_API_LLM_MODEL` | Model name | `gpt-4o-mini` |
 | `HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT` | Seconds before daemon auto-exits when idle (0 = never) | `0` |
+| `HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES` | Rotate the daemon log at startup when it reaches this size; `0` disables rotation | `10485760` (10 MiB) |
+| `HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT` | Retained backups; `0` truncates a full log at startup | `3` |
 | `HINDSIGHT_EMBED_CONTROL_PORT` | Default port for `hindsight-embed control start` | `7878` |
+
+Peak retained log size is approximately `MAX_BYTES × (BACKUP_COUNT + 1)`, or 40 MiB by default. Rotation
+occurs only when a daemon starts; it does not bound an uninterrupted daemon run.
 
 **Provider Examples:**
 
