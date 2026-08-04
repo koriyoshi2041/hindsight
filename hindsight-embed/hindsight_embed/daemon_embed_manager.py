@@ -53,13 +53,17 @@ def _safe_positive_float(value: float, fallback: float) -> float:
     return value if math.isfinite(value) and value > 0 else fallback
 
 
-def _parse_non_negative_int_env(name: str, default: int) -> int:
-    """Parse a non-negative integer environment variable."""
+def _parse_non_negative_int(value: str | None, default: int, name: str) -> int:
+    """Parse a non-negative integer, falling back for invalid or negative values."""
     try:
-        value = int(os.getenv(name, str(default)))
+        parsed = int(value) if value is not None else default
     except ValueError:
+        logger.warning("Invalid %s=%r; using %d", name, value, default)
         return default
-    return value if value >= 0 else default
+    if parsed < 0:
+        logger.warning("Invalid %s=%r; using %d", name, value, default)
+        return default
+    return parsed
 
 
 # Constants
@@ -70,9 +74,15 @@ DAEMON_STARTUP_TIMEOUT = int(os.getenv("HINDSIGHT_EMBED_DAEMON_STARTUP_TIMEOUT",
 DEFAULT_DAEMON_IDLE_TIMEOUT = 0  # 0 = disabled (no auto-exit)
 DEFAULT_DAEMON_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_DAEMON_LOG_BACKUP_COUNT = 3
-DAEMON_LOG_MAX_BYTES = _parse_non_negative_int_env("HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES", DEFAULT_DAEMON_LOG_MAX_BYTES)
-DAEMON_LOG_BACKUP_COUNT = _parse_non_negative_int_env(
-    "HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT", DEFAULT_DAEMON_LOG_BACKUP_COUNT
+DAEMON_LOG_MAX_BYTES = _parse_non_negative_int(
+    os.getenv("HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES"),
+    DEFAULT_DAEMON_LOG_MAX_BYTES,
+    "HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES",
+)
+DAEMON_LOG_BACKUP_COUNT = _parse_non_negative_int(
+    os.getenv("HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT"),
+    DEFAULT_DAEMON_LOG_BACKUP_COUNT,
+    "HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT",
 )
 # When another process is concurrently starting the daemon, the TCP port can be
 # bound before /health returns 200. Give that warming daemon a short grace window
@@ -137,13 +147,14 @@ class DaemonEmbedManager(EmbedManager):
 
         Startup is serialized by the profile lock, and this runs only after
         any stale daemon has been stopped. That keeps child processes from
-        writing to a renamed inode during rotation.
+        writing to a renamed inode during rotation. Rotation only occurs at
+        startup; an already-running daemon is left untouched.
         """
         if max_bytes == 0 or not log_path.exists() or log_path.stat().st_size < max_bytes:
             return
 
         if backup_count == 0:
-            log_path.unlink()
+            log_path.write_bytes(b"")
             return
 
         oldest = log_path.with_name(f"{log_path.name}.{backup_count}")
@@ -569,7 +580,20 @@ class DaemonEmbedManager(EmbedManager):
 
         # Create log directory
         daemon_log.parent.mkdir(parents=True, exist_ok=True)
-        self._rotate_daemon_log(daemon_log)
+        max_bytes = _parse_non_negative_int(
+            env.get("HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES"),
+            DAEMON_LOG_MAX_BYTES,
+            "HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES",
+        )
+        backup_count = _parse_non_negative_int(
+            env.get("HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT"),
+            DAEMON_LOG_BACKUP_COUNT,
+            "HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT",
+        )
+        try:
+            self._rotate_daemon_log(daemon_log, max_bytes=max_bytes, backup_count=backup_count)
+        except OSError as exc:
+            logger.warning("Could not rotate daemon log %s: %s", daemon_log, exc)
         env["HINDSIGHT_API_DAEMON_LOG"] = str(daemon_log)
 
         # Build command

@@ -337,10 +337,11 @@ class ProfileManager:
         if lock_path.exists():
             lock_path.unlink()
 
-        # Remove log file
+        # Remove the active log and any retained rotation backups.
         log_path = self._get_profiles_dir() / f"{name}.log"
-        if log_path.exists():
-            log_path.unlink()
+        for retained_log in log_path.parent.glob(f"{log_path.name}.*"):
+            retained_log.unlink()
+        log_path.unlink(missing_ok=True)
 
         # Update metadata
         metadata = self._load_metadata()

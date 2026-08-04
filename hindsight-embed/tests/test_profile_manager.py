@@ -1,16 +1,12 @@
 """Tests for profile_manager module."""
 
 import json
-import os
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
 
 from hindsight_embed.profile_manager import (
-    ProfileInfo,
     ProfileManager,
-    ProfilePaths,
     resolve_active_profile,
     validate_profile_exists,
 )
@@ -119,16 +115,19 @@ class TestProfileManager:
         # Create profile
         profile_manager.create_profile("test-profile", {"KEY": "value"})
         assert profile_manager.profile_exists("test-profile")
+        profiles_dir = temp_hindsight_dir / "profiles"
+        (profiles_dir / "test-profile.log").write_text("current")
+        (profiles_dir / "test-profile.log.1").write_text("retained")
 
         # Delete profile
         profile_manager.delete_profile("test-profile")
         assert not profile_manager.profile_exists("test-profile")
 
         # Verify all files are removed
-        profiles_dir = temp_hindsight_dir / "profiles"
         assert not (profiles_dir / "test-profile.env").exists()
         assert not (profiles_dir / "test-profile.lock").exists()
         assert not (profiles_dir / "test-profile.log").exists()
+        assert not (profiles_dir / "test-profile.log.1").exists()
 
         # Verify metadata no longer contains profile
         metadata_path = profiles_dir / "metadata.json"
