@@ -443,3 +443,36 @@ class TestStartDaemonSerialization:
         ):
             assert manager._start_daemon_locked({}, "codex", paths) is True
             mock_popen.assert_not_called()
+
+
+class TestDaemonLogRotation:
+    """Tests for restart-boundary daemon log rotation."""
+
+    def test_small_log_is_left_in_place(self, tmp_path):
+        log_path = tmp_path / "daemon.log"
+        log_path.write_bytes(b"1234")
+
+        DaemonEmbedManager._rotate_daemon_log(log_path, max_bytes=5, backup_count=2)
+
+        assert log_path.read_bytes() == b"1234"
+        assert not (tmp_path / "daemon.log.1").exists()
+
+    def test_full_log_rotates_and_retention_is_bounded(self, tmp_path):
+        log_path = tmp_path / "daemon.log"
+        log_path.write_bytes(b"current")
+        (tmp_path / "daemon.log.1").write_bytes(b"previous")
+        (tmp_path / "daemon.log.2").write_bytes(b"oldest")
+
+        DaemonEmbedManager._rotate_daemon_log(log_path, max_bytes=7, backup_count=2)
+
+        assert not log_path.exists()
+        assert (tmp_path / "daemon.log.1").read_bytes() == b"current"
+        assert (tmp_path / "daemon.log.2").read_bytes() == b"previous"
+
+    def test_zero_backups_truncates_full_log(self, tmp_path):
+        log_path = tmp_path / "daemon.log"
+        log_path.write_bytes(b"current")
+
+        DaemonEmbedManager._rotate_daemon_log(log_path, max_bytes=1, backup_count=0)
+
+        assert not log_path.exists()
