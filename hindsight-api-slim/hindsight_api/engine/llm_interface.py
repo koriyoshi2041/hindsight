@@ -6,10 +6,11 @@ enabling support for multiple LLM backends (OpenAI, Anthropic, Gemini, Codex, et
 """
 
 from abc import ABC, abstractmethod
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, AsyncContextManager, Callable, Self
+from typing import Any, Callable, Self
 
 from .response_models import LLMToolCallResult
 
@@ -112,7 +113,7 @@ class LLMInterface(ABC):
         strict_schema: bool = False,
         return_usage: bool = False,
         cached_prefix: str | None = None,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> Any:
         """
         Make an LLM API call with retry logic.
@@ -134,6 +135,11 @@ class LLMInterface(ABC):
             cached_prefix: Opaque handle from ``get_or_create_cached_prefix`` for the
                 cacheable system prefix, or None. Providers without explicit prompt
                 caching ignore it (and the wrapper only forwards it when set).
+            attempt_context: Factory for an async context manager holding the shared
+                concurrency permits. Passed only when the provider declares
+                ``supports_attempt_scoped_concurrency()``; the provider must enter it
+                around each individual upstream request so retry backoff never
+                occupies a permit.
 
         Returns:
             If return_usage=False: Parsed response if response_format is provided, otherwise text content.
@@ -159,7 +165,7 @@ class LLMInterface(ABC):
         tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
         cached_prefix: str | None = None,
         cached_prefix_message_count: int = 0,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> LLMToolCallResult:
         """
         Make an LLM API call with tool/function calling support.
@@ -174,6 +180,8 @@ class LLMInterface(ABC):
             initial_backoff: Initial backoff time in seconds.
             max_backoff: Maximum backoff time in seconds.
             tool_choice: Canonical tool-selection policy.
+            attempt_context: Factory for an async context manager holding the shared
+                concurrency permits — see ``call``.
 
         Returns:
             LLMToolCallResult with content and/or tool_calls.

@@ -12,10 +12,10 @@ import io
 import json
 import logging
 import time
-from contextlib import nullcontext
+from contextlib import AbstractAsyncContextManager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, AsyncContextManager, Callable
+from typing import Any, Callable
 
 from google import genai
 from google.genai import errors as genai_errors
@@ -312,7 +312,7 @@ class GeminiLLM(LLMInterface):
         strict_schema: bool = False,
         return_usage: bool = False,
         cached_prefix: str | None = None,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> Any:
         """
         Make a Gemini/VertexAI API call with retry logic.
@@ -427,7 +427,7 @@ class GeminiLLM(LLMInterface):
 
         for attempt in range(max_retries + 1):
             try:
-                async with attempt_context() if attempt_context else nullcontext():
+                async with attempt_context() if attempt_context is not None else nullcontext():
                     set_stage(f"llm.gemini.{scope}.attempt={attempt + 1}/{max_retries + 1}")
                     response = await asyncio.wait_for(
                         self._client.aio.models.generate_content(
@@ -636,7 +636,7 @@ class GeminiLLM(LLMInterface):
         tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
         cached_prefix: str | None = None,
         cached_prefix_message_count: int = 0,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> LLMToolCallResult:
         """
         Make a Gemini/VertexAI API call with tool/function calling support.
@@ -777,7 +777,7 @@ class GeminiLLM(LLMInterface):
                 # on the uncached fallback path send the full conversation so the
                 # re-inlined system+tools prefix has its whole context.
                 active_contents = delta_contents if cache_active else full_contents
-                async with attempt_context() if attempt_context else nullcontext():
+                async with attempt_context() if attempt_context is not None else nullcontext():
                     set_stage(f"llm.gemini.tools.attempt={attempt + 1}/{max_retries + 1}")
                     response = await asyncio.wait_for(
                         self._client.aio.models.generate_content(

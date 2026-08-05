@@ -12,8 +12,8 @@ import asyncio
 import json
 import logging
 import time
-from contextlib import nullcontext
-from typing import Any, AsyncContextManager, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
+from typing import Any, Callable
 
 from hindsight_api.engine.llm_interface import LLM_TOOL_CHOICE_AUTO, LLMInterface, LLMToolChoice
 from hindsight_api.engine.llm_trace import LLMResponseUsage, stash_response_usage
@@ -175,7 +175,7 @@ class AnthropicLLM(LLMInterface):
         skip_validation: bool = False,
         strict_schema: bool = False,
         return_usage: bool = False,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> Any:
         """
         Make an LLM API call with retry logic.
@@ -429,7 +429,7 @@ class AnthropicLLM(LLMInterface):
         initial_backoff: float = 1.0,
         max_backoff: float = 30.0,
         tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> LLMToolCallResult:
         """
         Make an LLM API call with tool/function calling support.

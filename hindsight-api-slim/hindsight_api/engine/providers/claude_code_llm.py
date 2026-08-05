@@ -11,8 +11,8 @@ import json
 import logging
 import tempfile
 import time
-from contextlib import nullcontext
-from typing import Any, AsyncContextManager, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
@@ -164,7 +164,7 @@ class ClaudeCodeLLM(LLMInterface):
         skip_validation: bool = False,
         strict_schema: bool = False,
         return_usage: bool = False,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> Any:
         """
         Make an LLM API call with retry logic.
@@ -258,7 +258,7 @@ class ClaudeCodeLLM(LLMInterface):
                 # Collect streaming response
                 full_text = ""
 
-                async with attempt_context() if attempt_context else nullcontext():
+                async with attempt_context() if attempt_context is not None else nullcontext():
                     set_stage(f"llm.claude_code.{scope}.attempt={attempt + 1}/{max_retries + 1}")
                     async for message in query(prompt=user_content, options=options):
                         if isinstance(message, AssistantMessage):
@@ -407,7 +407,7 @@ class ClaudeCodeLLM(LLMInterface):
         initial_backoff: float = 1.0,
         max_backoff: float = 30.0,
         tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> LLMToolCallResult:
         """
         Make an LLM API call with tool/function calling support using Claude Agent SDK.
@@ -584,7 +584,7 @@ class ClaudeCodeLLM(LLMInterface):
                 full_text = ""
                 tool_calls: list[LLMToolCall] = []
 
-                async with attempt_context() if attempt_context else nullcontext():
+                async with attempt_context() if attempt_context is not None else nullcontext():
                     set_stage(f"llm.claude_code.tools.attempt={attempt + 1}/{max_retries + 1}")
                     # Use ClaudeSDKClient for tool calling support
                     # Note: query() does NOT support custom tools, only ClaudeSDKClient does

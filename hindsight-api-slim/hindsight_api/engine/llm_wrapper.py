@@ -117,10 +117,22 @@ def _semaphores_for_scope(scope: str) -> list[asyncio.Semaphore]:
 @asynccontextmanager
 async def _attempt_permits(scope: str):
     """Hold configured LLM concurrency permits for one upstream attempt."""
+    from ..worker.stage import get_stage, set_stage
+
     async with AsyncExitStack() as stack:
         for sem in _semaphores_for_scope(scope):
             await stack.enter_async_context(sem)
-        yield
+        try:
+            yield
+        except BaseException:
+            # A failed attempt exits here with its permits released while the
+            # provider classifies the error and sleeps out its backoff. Suffix
+            # the stage so `attempt=N` always means "permits held, request in
+            # flight" (#3002); the next attempt re-stamps after re-acquiring.
+            stage = get_stage()
+            if stage is not None and not stage.endswith(".backoff"):
+                set_stage(f"{stage}.backoff")
+            raise
 
 
 def _request_params(
@@ -987,7 +999,11 @@ class LLMProvider:
                 if not attempt_gated:
                     for sem in _semaphores_for_scope(scope):
                         await stack.enter_async_context(sem)
-                set_stage(base_stage)
+                    # Permits in hand — only now leave `.queued`. Attempt-gated
+                    # providers acquire permits per attempt instead, so they keep
+                    # `.queued` until their first `attempt=N` stamp lands after
+                    # the permit acquire inside attempt_context (#3002).
+                    set_stage(base_stage)
 
                 # cached_prefix is only set for providers that returned a handle
                 # from get_or_create_cached_prefix() (e.g. Gemini); it's None for
@@ -1127,7 +1143,10 @@ class LLMProvider:
                 if not attempt_gated:
                     for sem in _semaphores_for_scope(scope):
                         await stack.enter_async_context(sem)
-                set_stage(base_stage)
+                    # Permits in hand — only now leave `.queued`; attempt-gated
+                    # providers stay `.queued` until their first post-acquire
+                    # `attempt=N` stamp (see call() above, #3002).
+                    set_stage(base_stage)
 
                 # cached_prefix is only set for providers that returned a handle
                 # from get_or_create_cached_prefix() / create_incremental_cache();

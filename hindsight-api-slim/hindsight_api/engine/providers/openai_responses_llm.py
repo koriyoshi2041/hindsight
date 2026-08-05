@@ -36,8 +36,8 @@ import json
 import logging
 import os
 import time
-from contextlib import nullcontext
-from typing import Any, AsyncContextManager, Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI
@@ -342,7 +342,7 @@ class OpenAIResponsesLLM(LLMInterface):
         max_retries: int,
         initial_backoff: float,
         max_backoff: float,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> Any:
         """Call ``responses.create`` with retries and hand the response to ``parse``.
 
@@ -438,7 +438,7 @@ class OpenAIResponsesLLM(LLMInterface):
         strict_schema: bool = False,
         return_usage: bool = False,
         cached_prefix: str | None = None,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> Any:
         """Make a Responses API call with retry logic (see ``LLMInterface.call``)."""
         start_time = time.time()
@@ -531,7 +531,7 @@ class OpenAIResponsesLLM(LLMInterface):
         tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
         cached_prefix: str | None = None,
         cached_prefix_message_count: int = 0,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> LLMToolCallResult:
         """Make a Responses API call with tools (see ``LLMInterface.call_with_tools``).
 

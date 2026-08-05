@@ -26,10 +26,10 @@ import logging
 import os
 import re
 import time
-from contextlib import nullcontext
+from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from typing import Any, AsyncContextManager, Callable
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 import httpx
@@ -770,7 +770,7 @@ class OpenAICompatibleLLM(LLMInterface):
         skip_validation: bool = False,
         strict_schema: bool = False,
         return_usage: bool = False,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> Any:
         """
         Make an LLM API call with retry logic.
@@ -1180,7 +1180,7 @@ class OpenAICompatibleLLM(LLMInterface):
         initial_backoff: float = 1.0,
         max_backoff: float = 30.0,
         tool_choice: LLMToolChoice = LLM_TOOL_CHOICE_AUTO,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> LLMToolCallResult:
         """
         Make an LLM API call with tool/function calling support.
@@ -1436,7 +1436,7 @@ class OpenAICompatibleLLM(LLMInterface):
         skip_validation: bool,
         scope: str = "memory",
         return_usage: bool = False,
-        attempt_context: Callable[[], AsyncContextManager[None]] | None = None,
+        attempt_context: Callable[[], AbstractAsyncContextManager[None]] | None = None,
     ) -> Any:
         """
         Call Ollama using native API with JSON schema enforcement.
