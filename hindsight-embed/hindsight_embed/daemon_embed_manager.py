@@ -72,18 +72,10 @@ def _parse_non_negative_int(value: str | None, default: int, name: str) -> int:
 # runners than POSIX.
 DAEMON_STARTUP_TIMEOUT = int(os.getenv("HINDSIGHT_EMBED_DAEMON_STARTUP_TIMEOUT", "180"))
 DEFAULT_DAEMON_IDLE_TIMEOUT = 0  # 0 = disabled (no auto-exit)
+ENV_DAEMON_LOG_MAX_BYTES = "HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES"
+ENV_DAEMON_LOG_BACKUP_COUNT = "HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT"
 DEFAULT_DAEMON_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_DAEMON_LOG_BACKUP_COUNT = 3
-DAEMON_LOG_MAX_BYTES = _parse_non_negative_int(
-    os.getenv("HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES"),
-    DEFAULT_DAEMON_LOG_MAX_BYTES,
-    "HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES",
-)
-DAEMON_LOG_BACKUP_COUNT = _parse_non_negative_int(
-    os.getenv("HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT"),
-    DEFAULT_DAEMON_LOG_BACKUP_COUNT,
-    "HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT",
-)
 # When another process is concurrently starting the daemon, the TCP port can be
 # bound before /health returns 200. Give that warming daemon a short grace window
 # before treating the listener as stale/foreign and attempting to reclaim it.
@@ -138,11 +130,7 @@ class DaemonEmbedManager(EmbedManager):
         self._profile_manager = ProfileManager()
 
     @staticmethod
-    def _rotate_daemon_log(
-        log_path: Path,
-        max_bytes: int = DAEMON_LOG_MAX_BYTES,
-        backup_count: int = DAEMON_LOG_BACKUP_COUNT,
-    ) -> None:
+    def _rotate_daemon_log(log_path: Path, max_bytes: int, backup_count: int) -> None:
         """Rotate a full daemon log before a new daemon opens it.
 
         Startup is serialized by the profile lock, and this runs only after
@@ -581,14 +569,14 @@ class DaemonEmbedManager(EmbedManager):
         # Create log directory
         daemon_log.parent.mkdir(parents=True, exist_ok=True)
         max_bytes = _parse_non_negative_int(
-            env.get("HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES"),
-            DAEMON_LOG_MAX_BYTES,
-            "HINDSIGHT_EMBED_DAEMON_LOG_MAX_BYTES",
+            env.get(ENV_DAEMON_LOG_MAX_BYTES),
+            DEFAULT_DAEMON_LOG_MAX_BYTES,
+            ENV_DAEMON_LOG_MAX_BYTES,
         )
         backup_count = _parse_non_negative_int(
-            env.get("HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT"),
-            DAEMON_LOG_BACKUP_COUNT,
-            "HINDSIGHT_EMBED_DAEMON_LOG_BACKUP_COUNT",
+            env.get(ENV_DAEMON_LOG_BACKUP_COUNT),
+            DEFAULT_DAEMON_LOG_BACKUP_COUNT,
+            ENV_DAEMON_LOG_BACKUP_COUNT,
         )
         try:
             self._rotate_daemon_log(daemon_log, max_bytes=max_bytes, backup_count=backup_count)
