@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Literal, ParamSpec, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, ParamSpec, TypeVar, cast, overload
 
 import asyncpg
 import httpx
@@ -931,6 +931,24 @@ def _resolve_refresh_tag_filtering(
     return RefreshTagFiltering(tags=model_tags, tags_match=tags_match, tag_groups=None)
 
 
+def _may_need_refresh(last_refreshed_at: datetime | None, watermark: datetime | None) -> bool:
+    """Approximate staleness from the bank's write watermark alone.
+
+    False is exact — nothing in the bank has been written since the refresh, so
+    nothing in the model's scope has either. True only means *something* was
+    written; it may well be outside the model's tags, which is why the surfaces
+    built on this say "may need refresh" rather than "stale". The exact answer
+    costs a scan of the bank's memories per model
+    (:meth:`MemoryEngine.compute_mental_model_is_stale`) and is reserved for the
+    single-model read.
+    """
+    if last_refreshed_at is None:
+        return True  # Never refreshed — nothing to be current with.
+    if watermark is None:
+        return False  # Empty bank.
+    return watermark > last_refreshed_at
+
+
 def _count_retrieved_facts(tool_trace: list[ToolCallTrace]) -> dict[str, int]:
     """Count what a refresh's tool calls actually returned, by fact type.
 
@@ -1297,6 +1315,7 @@ class MemoryEngine(MemoryEngineInterface):
         self._db_acquire_timeout = db_acquire_timeout if db_acquire_timeout is not None else config.db_acquire_timeout
         self._db_statement_timeout = config.db_statement_timeout
         self._db_max_parallel_workers_per_gather = config.db_max_parallel_workers_per_gather
+        self._entity_trgm_similarity_threshold = config.entity_trgm_similarity_threshold
         self._run_migrations = run_migrations
         self._retain_entity_lookup = config.retain_entity_lookup
         self._retain_entity_resolution_batch_size = config.retain_entity_resolution_batch_size
@@ -1320,7 +1339,7 @@ class MemoryEngine(MemoryEngineInterface):
         else:
             from .query_analyzer import DateparserQueryAnalyzer
 
-            self.query_analyzer = DateparserQueryAnalyzer()
+            self.query_analyzer = DateparserQueryAnalyzer(languages=config.query_analyzer_languages)
 
         # Resolve each operation's effective per-request defaults: a per-op override
         # (``HINDSIGHT_API_RETAIN_LLM_TIMEOUT``, ``..._MAX_RETRIES``, ``..._INITIAL_BACKOFF``,
@@ -1397,7 +1416,7 @@ class MemoryEngine(MemoryEngineInterface):
             base_url=retain_base_url,
             model=retain_model,
             reasoning_effort=config.retain_llm_reasoning_effort or config.llm_reasoning_effort,
-            extra_body=config.llm_extra_body,
+            extra_body=config.retain_llm_extra_body or config.llm_extra_body,
             default_headers=config.llm_default_headers,
             ollama_num_ctx=config.llm_ollama_num_ctx,
             litellmrouter_config=config.retain_llm_litellmrouter_config or config.llm_litellmrouter_config,
@@ -1436,7 +1455,7 @@ class MemoryEngine(MemoryEngineInterface):
             base_url=reflect_base_url,
             model=reflect_model,
             reasoning_effort=config.reflect_llm_reasoning_effort or config.llm_reasoning_effort,
-            extra_body=config.llm_extra_body,
+            extra_body=config.reflect_llm_extra_body or config.llm_extra_body,
             default_headers=config.llm_default_headers,
             ollama_num_ctx=config.llm_ollama_num_ctx,
             litellmrouter_config=config.reflect_llm_litellmrouter_config or config.llm_litellmrouter_config,
@@ -1475,7 +1494,7 @@ class MemoryEngine(MemoryEngineInterface):
             base_url=consolidation_base_url,
             model=consolidation_model,
             reasoning_effort=config.consolidation_llm_reasoning_effort or config.llm_reasoning_effort,
-            extra_body=config.llm_extra_body,
+            extra_body=config.consolidation_llm_extra_body or config.llm_extra_body,
             default_headers=config.llm_default_headers,
             ollama_num_ctx=config.llm_ollama_num_ctx,
             litellmrouter_config=config.consolidation_llm_litellmrouter_config or config.llm_litellmrouter_config,
@@ -2818,7 +2837,8 @@ class MemoryEngine(MemoryEngineInterface):
 
         content = refreshed.get("content") or ""
         stripped = content.strip()
-        based_on = (refreshed.get("reflect_response") or {}).get("based_on") or {}
+        reflect_response = refreshed.get("reflect_response") or {}
+        based_on = reflect_response.get("based_on") or {}
         outcome = RefreshMentalModelOutcomeMetadata(
             content_len=len(content),
             # The no-answer stub and the pending placeholder complete
@@ -2826,6 +2846,8 @@ class MemoryEngine(MemoryEngineInterface):
             # alone would read them as populated.
             populated_content=bool(stripped) and stripped not in (MENTAL_MODEL_PENDING_CONTENT, NO_ANSWER_TEXT),
             based_on_counts={fact_type: len(facts or []) for fact_type, facts in based_on.items()},
+            delta_ops_applied=len(reflect_response.get("delta_operations_applied") or []),
+            delta_ops_skipped=len(reflect_response.get("delta_operations_skipped") or []),
         )
         try:
             backend = await self._get_backend()
@@ -3128,8 +3150,10 @@ class MemoryEngine(MemoryEngineInterface):
         async def init_cross_encoder():
             """Initialize cross-encoder model."""
             cross_encoder = self._cross_encoder_reranker.cross_encoder
-            # For local providers, run in thread pool to avoid blocking event loop
-            if cross_encoder.provider_name == "local":
+            # For in-process models, run in thread pool to avoid blocking event loop.
+            # getattr: tests inject duck-typed cross encoders that don't subclass
+            # CrossEncoderModel (same reason as the provider_name read in _recall).
+            if getattr(cross_encoder, "blocking_init", False):
                 await loop.run_in_executor(None, lambda: asyncio.run(cross_encoder.initialize()))
             else:
                 await cross_encoder.initialize()
@@ -3337,6 +3361,7 @@ class MemoryEngine(MemoryEngineInterface):
 
         stmt_timeout_s = self._db_statement_timeout
         max_parallel_gather = self._db_max_parallel_workers_per_gather
+        trgm_similarity_threshold = self._entity_trgm_similarity_threshold
         text_search_extension = get_config().text_search_extension
 
         # Per-connection initialization callback (PostgreSQL-specific for now)
@@ -3373,6 +3398,17 @@ class MemoryEngine(MemoryEngineInterface):
             # unaffected. 0 disables.
             if stmt_timeout_s > 0:
                 await conn.execute(f"SET statement_timeout = '{stmt_timeout_s}s'")
+
+            # Entity resolution's pg_trgm `%` probe reads this GUC. Setting it here
+            # (SET, not SET LOCAL) applies it for the connection's lifetime — and,
+            # via the pool's setup hook, after each release-time RESET ALL — so the
+            # resolver no longer has to toggle it per query. pg_trgm may be absent
+            # on the cluster; narrow the except to PostgresError so the pool still
+            # builds (the resolver falls back to the "full" strategy in that case).
+            try:
+                await conn.execute(f"SET pg_trgm.similarity_threshold = {trgm_similarity_threshold}")
+            except asyncpg.exceptions.PostgresError:
+                logger.debug("Could not set pg_trgm.similarity_threshold — pg_trgm may not be installed")
 
             # Optional cap on planner parallelism for this process's
             # connections. Deployments that run background workers against a
@@ -7120,7 +7156,7 @@ class MemoryEngine(MemoryEngineInterface):
                             f"DELETE FROM {fq_table('invalidated_memory_units')} WHERE bank_id = $1", bank_id
                         )
 
-                        # Delete entities (cascades to unit_entities, entity_cooccurrences, memory_links with entity_id)
+                        # Delete entities (cascades to unit_entities, entity_cooccurrences)
                         await conn.execute(f"DELETE FROM {fq_table('entities')} WHERE bank_id = $1", bank_id)
 
                         # Sweep extension-owned bank-scoped tables (audit receipts,
@@ -10299,6 +10335,11 @@ class MemoryEngine(MemoryEngineInterface):
         freshness = await self.get_bank_freshness(bank_id, request_context=request_context)
         last_consolidated_at = freshness.get("last_consolidated_at")
         pending_consolidation = freshness.get("pending_consolidation", 0)
+        # Resolved once for the whole reflect: a mental model refreshed at or
+        # after this needs no scoped staleness query at all (see
+        # tool_search_mental_models).
+        raw_watermark = freshness.get("last_memory_write_at")
+        last_memory_write_at = datetime.fromisoformat(raw_watermark) if raw_watermark else None
 
         # Create tool callbacks that acquire connections only when needed
         from .retain import embedding_utils
@@ -10323,6 +10364,7 @@ class MemoryEngine(MemoryEngineInterface):
                     tags_match=tags_match,
                     tag_groups=tag_groups,
                     exclude_ids=exclude_mental_model_ids,
+                    last_memory_write_at=last_memory_write_at,
                 )
 
         # Get reflect source facts config (hierarchical: env → tenant → bank)
@@ -11043,13 +11085,41 @@ class MemoryEngine(MemoryEngineInterface):
             )
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
 
-        schema = get_current_schema()
+        return await self._cached_bank_stats(bank_id, force_refresh=force_refresh)
+
+    async def _cached_bank_stats(self, bank_id: str, *, force_refresh: bool = False) -> dict[str, Any]:
+        """The cached stats payload, without the auth/metering the public endpoint does.
+
+        Internal readers that only want one derived value out of the payload (the
+        write watermark) go through here so they share the endpoint's cached row
+        instead of paying for their own aggregate — and so a knowledge-tree poll
+        is not metered as a stats read.
+        """
         return await self._bank_stats_cache.get_or_load(
-            schema,
+            get_current_schema(),
             bank_id,
             lambda: self._compute_bank_stats(bank_id),
             force_refresh=force_refresh,
         )
+
+    async def _bank_write_watermark(self, bank_id: str) -> datetime | None:
+        """Newest write time across the bank's memories, or None for an empty bank.
+
+        Served from the bank-stats cache, so a polling UI pays one aggregate per
+        TTL rather than one scoped scan per mental model per request. Callers use
+        it for the half of staleness that is exact without a scope query: a model
+        refreshed at or after the watermark is definitively up to date. Older than
+        the watermark only means *something* changed — possibly outside the
+        model's tags — so that answer is "may need refresh", and only
+        :meth:`compute_mental_model_is_stale` can settle it.
+
+        Never call this while holding a pooled connection: on a cache miss it
+        acquires its own.
+        """
+        # The payload is JSON in the shared cache table, so timestamps live in it
+        # as ISO strings; a row cached before this field existed simply has none.
+        watermark = (await self._cached_bank_stats(bank_id)).get("last_memory_write_at")
+        return datetime.fromisoformat(watermark) if watermark else None
 
     async def _compute_bank_stats(self, bank_id: str) -> dict[str, Any]:
         from .memories import get_memories
@@ -11093,6 +11163,7 @@ class MemoryEngine(MemoryEngineInterface):
                     f"""
                     SELECT
                         MAX(consolidated_at) as last_consolidated_at,
+                        MAX(updated_at) as last_memory_write_at,
                         COUNT(*) FILTER (WHERE consolidated_at IS NULL AND fact_type IN ('experience', 'world')) as pending,
                         COUNT(*) FILTER (WHERE consolidation_failed_at IS NOT NULL AND fact_type IN ('experience', 'world')) as failed
                     FROM {fq_table("memory_units")}
@@ -11105,6 +11176,11 @@ class MemoryEngine(MemoryEngineInterface):
 
             ops_by_status = {row["status"]: row["count"] for row in ops_stats}
             last_consolidated_at = consolidation_row["last_consolidated_at"] if consolidation_row else None
+            # The bank's write watermark rides along on the aggregate above at no
+            # extra cost, and is what lets callers rule a mental model fresh
+            # without scanning its scope (see _bank_write_watermark). A store that
+            # predates the key answers "unknown", which reads as "may need refresh".
+            last_memory_write_at = consolidation_row.get("last_memory_write_at") if consolidation_row else None
 
             # link_counts_by_fact_type and link_breakdown are retained in the
             # response shape but no longer populated — producing them required
@@ -11123,6 +11199,7 @@ class MemoryEngine(MemoryEngineInterface):
                 "operations": ops_by_status,
                 "total_documents": doc_count_row["count"] if doc_count_row else 0,
                 "last_consolidated_at": last_consolidated_at.isoformat() if last_consolidated_at else None,
+                "last_memory_write_at": last_memory_write_at.isoformat() if last_memory_write_at else None,
                 "pending_consolidation": consolidation_row["pending"] if consolidation_row else 0,
                 "failed_consolidation": consolidation_row["failed"] if consolidation_row else 0,
                 "total_observations": node_counts.get("observation", 0),
@@ -11136,10 +11213,10 @@ class MemoryEngine(MemoryEngineInterface):
     ) -> dict[str, Any]:
         """Cheap subset of bank stats consumed by reflect().
 
-        Returns only the consolidation freshness fields: when the bank was last
-        consolidated and how many units are pending or failed. reflect() calls
-        this on every invocation, so it must not pay for any cross-table joins
-        or link aggregations.
+        Returns only the freshness fields: when the bank was last consolidated,
+        when a memory was last written, and how many units are pending or
+        failed. reflect() calls this on every invocation, so it must not pay for
+        any cross-table joins or link aggregations.
         """
         await self._authenticate_tenant(request_context)
         if self._operation_validator:
@@ -11151,19 +11228,21 @@ class MemoryEngine(MemoryEngineInterface):
             await self._validate_operation(self._operation_validator.validate_bank_read(ctx))
 
         backend = await self._get_backend()
-        # The current reflect() caller reads only last_consolidated_at and
-        # pending_consolidation, but `failed` is part of this method's published
-        # contract (see interface.get_bank_freshness) so the returned shape stays
-        # a strict subset of get_bank_stats. All three come from one scan, so
-        # keeping `failed` costs nothing extra.
+        # The current reflect() caller reads last_consolidated_at,
+        # pending_consolidation and last_memory_write_at, but `failed` is part of
+        # this method's published contract (see interface.get_bank_freshness) so
+        # the returned shape stays a strict subset of get_bank_stats. All four
+        # come from one scan, so keeping `failed` costs nothing extra.
         from .memories import get_memories
 
         async with acquire_with_retry(backend) as conn:
             fresh = await get_memories().consolidation_freshness(conn=conn, fq_table=fq_table, bank_id=bank_id)
 
         last = fresh["last_consolidated_at"]
+        watermark = fresh.get("last_memory_write_at")
         return {
             "last_consolidated_at": last.isoformat() if last else None,
+            "last_memory_write_at": watermark.isoformat() if watermark else None,
             "pending_consolidation": fresh["pending"],
             "failed_consolidation": fresh["failed"],
         }
@@ -12077,18 +12156,31 @@ class MemoryEngine(MemoryEngineInterface):
             # Use the previously stored structured doc when available; otherwise
             # parse the existing markdown so the very first delta refresh can
             # still operate without waiting for a full rebuild.
-            try:
-                if stored_structured_content is not None:
+            #
+            # A stored doc that fails validation (hand-edited JSON, a shape from an
+            # older schema) is NOT fatal: the markdown in ``content`` is the same
+            # document and ``parse_markdown`` is lenient, so re-deriving the baseline
+            # from it keeps the delta path alive and rebuilds the structured doc as a
+            # side effect. Giving up here would refuse every subsequent refresh
+            # (nothing else repairs the column) over a baseline we can reconstruct.
+            current_doc: StructuredDocument | None = None
+            if stored_structured_content is not None:
+                try:
                     current_doc = StructuredDocument.model_validate(stored_structured_content)
-                else:
+                except Exception as exc:
+                    logger.warning(
+                        f"[MENTAL_MODELS] Stored structured doc for {mental_model_id} is unusable "
+                        f"({exc}); re-deriving the delta baseline from the stored markdown"
+                    )
+            if current_doc is None:
+                try:
                     current_doc = parse_markdown(current_content)
-            except Exception as exc:
-                logger.warning(
-                    f"[MENTAL_MODELS] Could not load structured doc for {mental_model_id} "
-                    f"({exc}); falling back to full synthesis"
-                )
-                current_doc = None
-                mode_fallback_reason = "structured_doc_unreadable"
+                except Exception as exc:
+                    logger.warning(
+                        f"[MENTAL_MODELS] Could not load structured doc for {mental_model_id} "
+                        f"({exc}); delta has no baseline to edit"
+                    )
+                    mode_fallback_reason = "structured_doc_unreadable"
 
             if current_doc is not None:
                 supporting_facts = delta_supporting_facts
@@ -12139,38 +12231,61 @@ class MemoryEngine(MemoryEngineInterface):
                     )
                     op_list = parse_delta_operation_list(raw)
                     apply_outcome = apply_operations(current_doc, op_list.operations)
-                    final_structured = apply_outcome.document
-                    final_content = render_document(apply_outcome.document)
                     delta_operations = MentalModelDeltaOperations(
                         applied=apply_outcome.applied, skipped=apply_outcome.skipped
                     )
-                    delta_applied = True
-                    logger.info(
-                        f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: "
-                        f"applied {len(apply_outcome.applied)} op(s), "
-                        f"skipped {len(apply_outcome.skipped)}"
-                    )
+                    if op_list.operations and not apply_outcome.applied:
+                        # Every op the model emitted was rejected (unknown section_id,
+                        # index out of range, name collision), so the document is
+                        # unchanged. Persisting it would look like a clean refresh
+                        # while advancing the watermark past facts that never landed —
+                        # they would fall outside every future delta window. Treat it
+                        # as a failed delta, same as an outright error.
+                        logger.warning(
+                            f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: all "
+                            f"{len(apply_outcome.skipped)} op(s) were skipped, nothing applied"
+                        )
+                        mode_fallback_reason = "delta_ops_all_skipped"
+                    else:
+                        final_structured = apply_outcome.document
+                        final_content = render_document(apply_outcome.document)
+                        delta_applied = True
+                        logger.info(
+                            f"[MENTAL_MODELS] Delta refresh for {mental_model_id}: "
+                            f"applied {len(apply_outcome.applied)} op(s), "
+                            f"skipped {len(apply_outcome.skipped)}"
+                        )
+                        if apply_outcome.skipped:
+                            warnings.append(
+                                f"{len(apply_outcome.skipped)} of {len(op_list.operations)} delta operation(s) "
+                                "were rejected and their content did not reach the document. See the skipped "
+                                "operations for the reason each was dropped."
+                            )
                 except Exception as exc:
                     logger.warning(
                         f"[MENTAL_MODELS] Structured delta failed for {mental_model_id} "
-                        f"({exc}); falling back to full synthesis"
+                        f"({exc}); delta operations were not applied"
                     )
                     mode_fallback_reason = "delta_ops_failed"
 
             reflect_response_payload["delta_applied"] = delta_applied
-            if delta_applied and delta_operations is not None:
+            # Skipped ops are recorded whether or not the delta landed: when it did
+            # they explain a partial edit, and when it didn't they are the evidence
+            # for why the refresh is being refused.
+            if delta_operations is not None:
                 reflect_response_payload["delta_operations_applied"] = delta_operations.applied
                 reflect_response_payload["delta_operations_skipped"] = delta_operations.skipped
-            else:
+            if not delta_applied and created_after is not None:
                 # The candidate was synthesised from a delta-scoped recall, so it
                 # only reflects memories newer than the last refresh. Writing it
-                # whole would drop everything the document knew from older ones.
+                # whole would drop everything the document knew from older ones —
+                # the caller refuses it below (``refresh_failed_delta_not_applied``).
                 warnings.append(
                     "Delta operations were not applied "
-                    f"({mode_fallback_reason or 'unknown reason'}), so the refresh falls back to the "
-                    "reflect candidate — which was synthesised only from memories created after "
-                    f"{created_after.isoformat() if created_after else 'the last refresh'}. "
-                    "Content grounded in older memories is not carried over."
+                    f"({mode_fallback_reason or 'unknown reason'}), and the reflect candidate was "
+                    "synthesised only from memories created after "
+                    f"{created_after.isoformat()} — writing it would drop everything the document "
+                    "knew from older memories. The existing content is preserved and the refresh fails."
                 )
 
         effective_mode: RefreshMode = "delta" if delta_applied else "full"
@@ -12184,7 +12299,6 @@ class MemoryEngine(MemoryEngineInterface):
         # failures from callers (workers, tests). So the caller preserves the
         # existing content and raises, rather than persisting the empty render.
         if not final_content.strip():
-            reflect_response_payload["refresh_skipped"] = "empty_candidate"
             warnings.append(
                 "The refresh produced empty content, which usually means an upstream LLM failure. "
                 "A real refresh would preserve the existing content and fail."
@@ -12196,6 +12310,27 @@ class MemoryEngine(MemoryEngineInterface):
                 final_structured=None,
                 delta_operations=delta_operations,
                 outcome="refresh_failed_empty_candidate",
+            )
+
+        # Refuse to write a delta-window candidate as the whole document (#3112).
+        # ``final_content`` is only the reflect candidate when the delta failed, and
+        # that candidate was synthesised under ``created_after`` — one window of new
+        # facts, not the document's whole history. Storing it deletes everything
+        # grounded in older memories AND advances the watermark past it, so the loss
+        # is permanent. The guard is on the window rather than on each failure branch
+        # so any future one inherits it. ``created_after`` is unset only when the model
+        # has no ``last_refreshed_at`` — the column is NOT NULL and defaults to creation
+        # time, so a delta refresh always has a window today; keying on the window keeps
+        # this correct anyway, because a candidate read over full history IS a document
+        # and writing it is a legitimate full regeneration.
+        if use_delta and not delta_applied and created_after is not None:
+            return _finish(
+                effective_mode=effective_mode,
+                mode_fallback_reason=mode_fallback_reason,
+                final_content=final_content,
+                final_structured=None,
+                delta_operations=delta_operations,
+                outcome="refresh_failed_delta_not_applied",
             )
 
         # When delta is not applied (full mode, or delta fallback), parse the
@@ -12247,8 +12382,11 @@ class MemoryEngine(MemoryEngineInterface):
             Updated pinned mental model dict or None if not found
 
         Raises:
-            MentalModelRefreshError: The refresh produced empty content. The
-                previous content is preserved in the DB.
+            MentalModelRefreshError: The refresh could not produce a document that is
+                safe to store — it came back empty, its delta operations never reached
+                the document, or structured-output extraction failed. In every case the
+                previous content and the watermark are left untouched, so a retry reads
+                the same window again.
         """
         await self._authenticate_tenant(request_context)
 
@@ -12306,13 +12444,19 @@ class MemoryEngine(MemoryEngineInterface):
                     request_context=request_context,
                 )
 
-            if run.outcome == "refresh_failed_empty_candidate":
-                logger.warning(
-                    f"[MENTAL_MODELS] Refresh for {mental_model_id} produced empty content; "
-                    "preserving previous content and raising MentalModelRefreshError."
-                )
-                # Persist the reflect_response (so the failure is auditable) and
-                # the source-query tracking, but do NOT touch content/structured.
+            async def _preserve_and_fail(reason: str, detail: str) -> NoReturn:
+                """Fail the refresh without touching the document.
+
+                Every failure mode is handled the same way: persist the
+                reflect_response (so the failure is auditable under
+                ``refresh_skipped``) but write no content, no structured document
+                and no watermark — leaving ``last_refreshed_at`` where it was, so a
+                retry re-reads the same window instead of skipping past the facts
+                this run failed on. Then raise, because a caller that is told
+                nothing assumes the document was refreshed.
+                """
+                logger.warning(f"[MENTAL_MODELS] Refresh for {mental_model_id} failed ({reason}); {detail}")
+                reflect_response_payload["refresh_skipped"] = reason
                 await self.update_mental_model(
                     bank_id,
                     mental_model_id,
@@ -12321,27 +12465,36 @@ class MemoryEngine(MemoryEngineInterface):
                     request_context=request_context,
                 )
                 raise MentalModelRefreshError(
-                    f"Refresh produced empty content for mental_model_id={mental_model_id} "
-                    "(likely an upstream LLM failure). Previous content preserved in DB; "
-                    "reflect_response.refresh_skipped == 'empty_candidate' for audit."
+                    f"Refresh failed for mental_model_id={mental_model_id}: {detail} "
+                    f"Previous content preserved in DB; reflect_response.refresh_skipped == '{reason}' for audit."
+                )
+
+            if run.outcome == "refresh_failed_empty_candidate":
+                await _preserve_and_fail(
+                    "empty_candidate",
+                    "the refresh produced empty content (likely an upstream LLM failure).",
+                )
+
+            if run.outcome == "refresh_failed_delta_not_applied":
+                # #3112: the reflect candidate only covers the delta window, so it is
+                # not a document — see the guard in _execute_mental_model_refresh.
+                await _preserve_and_fail(
+                    run.mode_fallback_reason or "delta_not_applied",
+                    "delta operations did not reach the document, and the reflect candidate covers only "
+                    "memories newer than the last refresh, so writing it would drop the rest of the document.",
                 )
 
             # Parse the final stored content into structured_output when a schema is
             # configured. If extraction fails, fail the refresh loudly rather than
             # persisting content with no structured view (which would also clobber the
-            # previously-stored value); raising here skips update_mental_model, so the
-            # prior content and structured_output are preserved for retry.
+            # previously-stored value); failing here leaves content/structured untouched,
+            # so the prior content and structured_output are preserved for retry.
             if response_schema:
                 structured_output = await _structured_output_for(run.final_content)
                 if structured_output is None:
-                    logger.warning(
-                        f"[MENTAL_MODELS] Structured output extraction failed for {mental_model_id}; "
-                        "failing the refresh (prior content and structured_output preserved)."
-                    )
-                    raise MentalModelRefreshError(
-                        f"Structured output extraction failed for mental_model_id={mental_model_id} "
-                        "(a response_schema is configured). Prior content and structured_output preserved; "
-                        "the refresh can be retried."
+                    await _preserve_and_fail(
+                        "structured_output_failed",
+                        "structured output extraction failed while a response_schema is configured.",
                     )
                 reflect_response_payload["structured_output"] = structured_output
 
@@ -12884,7 +13037,7 @@ class MemoryEngine(MemoryEngineInterface):
         "kp.id, kp.bank_id, kp.parent_id, kp.kind, kp.name, kp.mental_model_id, "
         "kp.sort_order, kp.managed, kp.created_at, kp.updated_at, "
         "mm.tags AS mm_tags, mm.source_query AS mm_source_query, "
-        "mm.last_refreshed_at AS mm_last_refreshed_at, mm.trigger AS mm_trigger"
+        "mm.last_refreshed_at AS mm_last_refreshed_at"
     )
 
     def _kp_join(self) -> str:
@@ -13020,12 +13173,20 @@ class MemoryEngine(MemoryEngineInterface):
     ) -> list[dict[str, Any]]:
         """Return every folder/page node in the bank (flat; caller builds the tree).
 
-        When ``with_staleness`` is set, each page node also carries ``is_stale`` —
-        whether its backing mental model has memories in scope newer than its last
-        refresh. Off by default since it costs a stale check per page; the tree
-        view opts in, graph/export don't.
+        When ``with_staleness`` is set, each page node also carries ``is_stale``:
+        False when the page is provably up to date, True when it *may* need a
+        refresh. The answer comes from the bank's write watermark, not from a
+        scoped query per page — the tree view polls, and a scoped query costs a
+        full scan of the bank's memories each (there is no index on
+        ``updated_at``), so N pages meant N scans per poll. One cached watermark
+        keeps "up to date" exact and makes the other direction conservative: the
+        newer memory may lie outside the page's tags. The exact per-model answer
+        stays on the single mental-model read, which is where a user asks for it.
         """
         await self._authenticate_tenant(request_context)
+        # Resolve the watermark before taking a connection — on a cache miss it
+        # acquires one of its own, and holding two is how the pool deadlocks.
+        watermark = await self._bank_write_watermark(bank_id) if with_staleness else None
         backend = await self._get_backend()
         async with acquire_with_retry(backend) as conn:
             rows = await conn.fetch(
@@ -13043,14 +13204,7 @@ class MemoryEngine(MemoryEngineInterface):
                 for r in rows:
                     if r["kind"] != "page":
                         continue
-                    # compute_mental_model_is_stale reads last_refreshed_at/tags/trigger
-                    # from a dict; feed it the joined mental-model columns.
-                    mm_row = {
-                        "last_refreshed_at": r["mm_last_refreshed_at"],
-                        "tags": r["mm_tags"],
-                        "trigger": r["mm_trigger"],
-                    }
-                    by_id[r["id"]]["is_stale"] = await self.compute_mental_model_is_stale(conn, bank_id, mm_row)
+                    by_id[r["id"]]["is_stale"] = _may_need_refresh(r["mm_last_refreshed_at"], watermark)
         return nodes
 
     async def get_knowledge_page(
