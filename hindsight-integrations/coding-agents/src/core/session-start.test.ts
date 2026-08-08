@@ -20,7 +20,7 @@ describe("buildSessionStartContext", () => {
       startSeed,
       startSurvey,
     });
-    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { limit: 300 });
+    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { harness: "claude-code", limit: 300 });
     expect(startSurvey).toHaveBeenCalledWith("/repo/dir", {
       harness: "claude-code",
       model: "haiku",
@@ -53,9 +53,26 @@ describe("buildSessionStartContext", () => {
       startSeed,
       startSurvey,
     });
-    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { limit: 300 });
+    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { harness: "claude-code", limit: 300 });
     expect(startSurvey).not.toHaveBeenCalled();
     expect(out.systemMessage).toContain("is learning");
+  });
+
+  it("passes a non-default harness to the background seed", async () => {
+    const client = { listDocumentIds: async () => new Set<string>(), listPages: listPagesOk };
+    const startSeed = vi.fn();
+
+    await buildSessionStartContext({
+      cwd: "/repo/dir",
+      bankId: "bank-1",
+      cfg: resolveConfig({ codebaseSurvey: false }),
+      client,
+      harness: "codex",
+      hasGit: () => true,
+      startSeed,
+    });
+
+    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { harness: "codex", limit: 300 });
   });
 
   it("non-git dir -> no seed, listDocumentIds not called, roster preamble only (no learning note)", async () => {
@@ -123,7 +140,7 @@ describe("buildSessionStartContext", () => {
     });
     // The live bank is consulted, and an empty bank seeds — no client-side flag can contradict it.
     expect(called).toBe(true);
-    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { limit: 300 });
+    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { harness: "claude-code", limit: 300 });
     expect(out.systemMessage).toContain("is learning");
   });
 
@@ -141,7 +158,7 @@ describe("buildSessionStartContext", () => {
       startSurvey,
     });
     // The engine is idempotent, so every warm session start re-fires it to pick up missing work.
-    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { limit: 300 });
+    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { harness: "claude-code", limit: 300 });
     // The cold-only extras stay off: no survey, no user-facing learning note.
     expect(startSurvey).not.toHaveBeenCalled();
     expect(out.additionalContext).toContain("- Component map (p1)");
@@ -188,7 +205,7 @@ describe("buildSessionStartContext", () => {
       startSeed,
     });
     // Seeding is unaffected by a listPages failure.
-    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { limit: 300 });
+    expect(startSeed).toHaveBeenCalledWith("/repo/dir", { harness: "claude-code", limit: 300 });
     // Empty-state roster preamble still renders (no page names, no throw).
     expect(out.additionalContext).toContain("<hindsight_knowledge>");
     expect(out.additionalContext).toContain("No knowledge pages yet");

@@ -138,7 +138,7 @@ export async function buildSessionStartContext(args: {
   harness?: string;
   stateDir?: string;
   hasGit?: (dir: string) => boolean;
-  startSeed?: (repoDir: string, opts?: { limit?: number }) => void;
+  startSeed?: (repoDir: string, opts?: { harness?: string; limit?: number }) => void;
   startSurvey?: (
     repoDir: string,
     opts?: { harness?: SurveyHarness; model?: string; budgetUsd?: number }
@@ -208,7 +208,7 @@ export async function buildSessionStartContext(args: {
           // idempotent (per-bank lock, dedup by document id) and each run does only the missing
           // work: cold seed, newly appeared conversations, the next per-commit diff batch. The
           // one-time extras stay cold-gated below.
-          startSeed(cwd, { limit: cfg.seedLimit });
+          startSeed(cwd, { harness, limit: cfg.seedLimit });
           // Cold iff the bank has zero source:git docs (an undefined result — server error — is
           // NOT treated as cold; we never surveyed/noted on an unconfirmed-empty bank).
           if (docIds.size === 0) {
