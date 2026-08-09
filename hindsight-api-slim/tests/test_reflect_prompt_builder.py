@@ -19,9 +19,18 @@ without hiding what each one produces — the ``_assemble`` helper is a
 mechanical join, not a re-implementation of the builder.
 """
 
+import pytest
+
+from hindsight_api.engine.reflect import prompts
 from hindsight_api.engine.reflect.prompts import build_final_system_prompt, build_system_prompt_for_tools
 
 BANK = {"name": "TestBank", "mission": ""}
+
+
+@pytest.fixture(autouse=True)
+def _freeze_current_date(monkeypatch):
+    monkeypatch.setattr(prompts, "_current_utc_date", lambda: "2026-08-09")
+
 
 _HEADER = (
     "CRITICAL: You MUST ONLY use information from retrieved tool results. "
@@ -29,6 +38,11 @@ _HEADER = (
 )
 
 _DEFAULT_ROLE = "You are a reflection agent that answers questions by reasoning over retrieved memories."
+
+_CURRENT_DATE = """\
+## Current Date
+The current date is 2026-08-09 (UTC).
+"""
 
 _LANGUAGE_AND_RULES = """\
 ## LANGUAGE RULE (default - directives take precedence)
@@ -297,6 +311,7 @@ def _assemble(
     parts.append("")
     parts.append("Answer the user's question by reasoning over retrieved memories.")
     parts.append("")
+    parts.append(_CURRENT_DATE)
     parts.append(_LANGUAGE_AND_RULES)
     parts.append(retrieval)
     parts.append(_QUERY_STRATEGY)
@@ -560,6 +575,7 @@ _FRENCH_DIRECTIVE = {
 
 def test_final_prompt_always_includes_language_rule():
     prompt = build_final_system_prompt()
+    assert "The current date is 2026-08-09 (UTC)." in prompt
     assert "## LANGUAGE" in prompt
     assert "SAME language as the user's question" in prompt
 
