@@ -931,6 +931,24 @@ def test_query_analyzer_keeps_plausible_date_with_implausible_number(query_analy
 
 
 @pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("notes from 1890-03-05", datetime(1890, 3, 5)),
+        ("the roadmap milestone on 2050-01-15", datetime(2050, 1, 15)),
+        ("notes from March 1890", datetime(1890, 3, 1)),
+    ],
+)
+def test_query_analyzer_keeps_explicit_dates_outside_bare_year_window(query_analyzer, query, expected):
+    """The plausibility window applies to isolated years, not full dates."""
+    reference_date = datetime(2026, 8, 7, 12, 0, 0)
+
+    analysis = query_analyzer.analyze(query, reference_date)
+
+    assert analysis.temporal_constraint is not None
+    assert analysis.temporal_constraint.start_date.date() == expected.date()
+
+
+@pytest.mark.parametrize(
     ("query", "start", "end"),
     [
         # Relative days.
