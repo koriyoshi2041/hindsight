@@ -33,6 +33,7 @@ async def _insert_memory(
     text: str,
     fact_type: str = "experience",
     document_id: str | None = None,
+    chunk_id: str | None = None,
 ) -> uuid.UUID:
     """Seed one memory through the store, bypassing the LLM retain pipeline.
 
@@ -47,7 +48,7 @@ async def _insert_memory(
         tags=[],
         context=None,
         document_id=document_id,
-        chunk_id=None,
+        chunk_id=chunk_id,
         metadata=None,
         observation_scopes=None,
         entities=[],
@@ -431,6 +432,72 @@ class TestDocumentUpsertObservationCleanup:
             # The two doc-scoped memories are gone via FK cascade.
             doc_mem_count = await _count_surviving(conn, bank_id, [doc_mem_a, doc_mem_b])
             assert doc_mem_count == 0
+
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+    @pytest.mark.asyncio
+    async def test_delta_chunk_delete_removes_observations_from_outgoing_memories(
+        self, memory: MemoryEngine, request_context: RequestContext
+    ):
+        from hindsight_api.engine.retain.chunk_storage import delete_chunks_by_ids
+
+        bank_id = f"test-delta-obs-cleanup-{uuid.uuid4().hex[:8]}"
+        await _ensure_bank(memory, bank_id, request_context)
+
+        pool = await memory._get_pool()
+        doc_id = str(uuid.uuid4())
+        chunk_id = f"{bank_id}_{doc_id}_0"
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO documents (id, bank_id, original_text, content_hash, created_at, updated_at)
+                VALUES ($1, $2, 'old version', 'hash-old', NOW(), NOW())
+                """,
+                doc_id,
+                bank_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO chunks (chunk_id, document_id, bank_id, chunk_index, chunk_text, content_hash)
+                VALUES ($1, $2, $3, 0, 'old chunk', 'chunk-hash-old')
+                """,
+                chunk_id,
+                doc_id,
+                bank_id,
+            )
+            outgoing_mem = await _insert_memory(
+                memory,
+                conn,
+                bank_id,
+                "Old chunk fact.",
+                "experience",
+                document_id=doc_id,
+                chunk_id=chunk_id,
+            )
+            surviving_mem = await _insert_memory(memory, conn, bank_id, "Unchanged fact.")
+            obs_id = await _insert_observation(
+                memory,
+                conn,
+                bank_id,
+                "Observation joining changed and unchanged chunks.",
+                [outgoing_mem, surviving_mem],
+            )
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await delete_chunks_by_ids(
+                    conn,
+                    [chunk_id],
+                    bank_id,
+                    ops=memory._backend.ops,
+                )
+
+        async with pool.acquire() as conn:
+            obs_ids = await _get_observation_ids(conn, bank_id)
+            assert str(obs_id) not in obs_ids
+            assert await _count_surviving(conn, bank_id, [outgoing_mem]) == 0
+            assert await _get_consolidated_at(conn, surviving_mem, bank_id) is None
 
         await memory.delete_bank(bank_id, request_context=request_context)
 

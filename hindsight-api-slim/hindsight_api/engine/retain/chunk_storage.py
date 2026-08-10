@@ -55,7 +55,7 @@ async def load_existing_chunks(conn, bank_id: str, document_id: str) -> list[Exi
     ]
 
 
-async def delete_chunks_by_ids(conn, chunk_ids: list[str], bank_id: str | None = None, txn=None) -> None:
+async def delete_chunks_by_ids(conn, chunk_ids: list[str], bank_id: str | None = None, txn=None, ops=None) -> None:
     """
     Delete specific chunks by their IDs.
 
@@ -76,6 +76,44 @@ async def delete_chunks_by_ids(conn, chunk_ids: list[str], bank_id: str | None =
     from ..memories import META_CHUNK_ID, DeletePredicate, get_memories
 
     _store = get_memories()
+    if bank_id:
+        if _store.writes_memory_rows_in_sql:
+            rows = await conn.fetch(
+                f"""
+                SELECT id
+                FROM {fq_table("memory_units")}
+                WHERE bank_id = $1
+                  AND chunk_id = ANY($2::text[])
+                  AND fact_type IN ('experience', 'world')
+                """,
+                bank_id,
+                chunk_ids,
+            )
+            outgoing_unit_ids = [str(row["id"]) for row in rows]
+        else:
+            outgoing_unit_ids = []
+            for chunk_id in chunk_ids:
+                page_token = ""
+                while True:
+                    page = await _store.scan_memories(
+                        conn=conn,
+                        fq_table=fq_table,
+                        bank_id=bank_id,
+                        fact_types=["experience", "world"],
+                        metadata_equals={META_CHUNK_ID: chunk_id},
+                        limit=500,
+                        page_token=page_token,
+                    )
+                    outgoing_unit_ids.extend(memory.unit_id for memory in page.memories)
+                    page_token = page.next_page_token
+                    if not page_token:
+                        break
+
+        if outgoing_unit_ids:
+            from .fact_storage import delete_stale_observations_for_memories
+
+            await delete_stale_observations_for_memories(conn, bank_id, outgoing_unit_ids, ops=ops)
+
     if bank_id and not _store.writes_memory_rows_in_sql:
         for _cid in chunk_ids:
             await _store.delete_where(bank_id, DeletePredicate(metadata_equals={META_CHUNK_ID: _cid}), txn=txn)

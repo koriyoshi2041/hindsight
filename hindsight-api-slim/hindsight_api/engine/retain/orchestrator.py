@@ -2571,7 +2571,13 @@ async def _try_delta_retain(
                     for idx in changed_indices + removed_indices
                     if idx in existing_by_index
                 ]
-                await chunk_storage.delete_chunks_by_ids(conn, chunks_to_delete, bank_id, txn=_group_txn)
+                await chunk_storage.delete_chunks_by_ids(
+                    conn,
+                    chunks_to_delete,
+                    bank_id,
+                    txn=_group_txn,
+                    ops=pool.ops,
+                )
                 log_buffer.append(
                     f"  Deleted {len(chunks_to_delete)} chunks "
                     f"({len(changed_indices)} changed + {len(removed_indices)} removed) "
