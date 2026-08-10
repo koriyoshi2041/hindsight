@@ -21,13 +21,18 @@ _DEFAULT_ROLE = "You are a reflection agent that answers questions by reasoning 
 _DEFAULT_FINAL_ROLE = "You are a thoughtful assistant that synthesizes answers from retrieved memories."
 
 
-def _current_utc_date() -> str:
-    """Return today's UTC date for time-relative reflect reasoning."""
-    return datetime.now(timezone.utc).date().isoformat()
+def _current_utc_datetime() -> str:
+    """Return the current UTC date and time for time-relative reflect reasoning.
+
+    Minute precision (not seconds) so requests within the same minute share an
+    identical prompt string — the finest granularity that still keeps prompt
+    caching viable for bursty traffic.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def _current_date_section() -> str:
-    return f"## Current Date\nThe current date is {_current_utc_date()} (UTC)."
+def _current_datetime_section() -> str:
+    return f"## Current Date and Time\nThe current date and time is {_current_utc_datetime()}."
 
 
 def _extract_directive_rules(directives: list[dict[str, Any]]) -> list[str]:
@@ -160,8 +165,6 @@ def build_system_prompt_for_tools(
 
     parts.extend(
         [
-            _current_date_section(),
-            "",
             "## LANGUAGE RULE (default - directives take precedence)",
             "- By default, detect the language of the user's question and respond in that SAME language.",
             "- If the question is in Chinese, respond in Chinese. If in Japanese, respond in Japanese.",
@@ -404,6 +407,13 @@ def build_system_prompt_for_tools(
         ]
     )
 
+    # Volatile "now" reference goes here — after all the static instructions and
+    # right before the bank-specific/custom data. Everything above is identical
+    # across banks and requests, so it stays a cacheable prefix; only this
+    # timestamp and the custom tail below fall outside the cache.
+    parts.append("")
+    parts.append(_current_datetime_section())
+
     parts.append("")
     parts.append(f"## Memory Bank: {name}")
 
@@ -579,10 +589,12 @@ def build_final_system_prompt(
     role_section = escape_for_prompt(mission.strip()) if mission else _DEFAULT_FINAL_ROLE
 
     parts = [build_directives_section(directives) if directives else ""]
-    parts.append(_current_date_section())
     parts.append(_FINAL_SYSTEM_PROMPT_BASE.format(role_section=role_section))
     parts.append(_FINAL_LANGUAGE_RULE)
     parts.append(build_directives_reminder(directives) if directives else "")
+    # Volatile "now" reference last, so the static/per-bank instructions above
+    # remain a cacheable prefix and only this timestamp falls outside the cache.
+    parts.append(_current_datetime_section())
 
     return "\n\n".join(p.strip() for p in parts if p.strip()) + output_language_directive(llm_output_language)
 
