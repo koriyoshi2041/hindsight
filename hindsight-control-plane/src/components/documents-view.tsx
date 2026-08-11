@@ -1070,6 +1070,8 @@ export function DocumentsView() {
       // operation record instead, using the same API as the Operations view.
       await client.deleteOperation(currentBank, operationId);
       await loadPendingUploads();
+    } catch {
+      // Error toast is shown automatically by the API client interceptor
     } finally {
       setDeletingUploadOperationId(null);
     }
