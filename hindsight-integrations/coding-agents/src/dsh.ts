@@ -25,6 +25,7 @@
 import { randomUUID } from "node:crypto";
 import { deriveBankId } from "./core/bank";
 import { applyBankConfig, loadConfig } from "./core/config";
+import { DAEMON_WAIT_RETAIN_MS, DAEMON_WAIT_SESSION_START_MS, ensureDaemon } from "./core/daemon";
 import { diag } from "./core/diag";
 import { HindsightClient } from "./core/hindsight";
 import type { ToolSpec } from "./core/knowledge-tools";
@@ -111,6 +112,8 @@ interface DshToolRunContext {
 export interface Workspace {
   core: RuntimeCore;
   root: string;
+  /** Start or adopt the local embed server when this bank uses daemon mode. */
+  ensureDaemon?: (waitMs: number) => Promise<void>;
   /** Started by the first SESSION in this repo, then shared by every later one. */
   seeded?: Promise<void>;
   tools?: ToolSpec[];
@@ -169,7 +172,11 @@ function workspaceFor(root: string): Workspace | undefined {
     const agent = liveAgents.get(sessionId);
     return agent ? readDshEvents(agent.session.events) : [];
   });
-  const workspace: Workspace = { core, root };
+  const workspace: Workspace = {
+    core,
+    root,
+    ensureDaemon: (waitMs) => ensureDaemon(cfg, HARNESS, { waitMs }),
+  };
   workspaces.set(root, workspace);
   return workspace;
 }
@@ -241,6 +248,7 @@ export function createDshHooks(resolve: (agent: DshAgent) => Workspace | undefin
       const workspace = resolve(agent);
       if (!workspace) return;
       liveAgents.set(agent.session.header.id, agent);
+      void workspace.ensureDaemon?.(DAEMON_WAIT_SESSION_START_MS);
       ensureSeeded(workspace);
     },
 
@@ -254,6 +262,7 @@ export function createDshHooks(resolve: (agent: DshAgent) => Workspace | undefin
       if (!workspace) return decision;
       const sessionId = agent.session.header.id;
       liveAgents.set(sessionId, agent);
+      await workspace.ensureDaemon?.(DAEMON_WAIT_SESSION_START_MS);
       // A resumed session gets no `agent/session-start` in some compositions; seeding here too
       // keeps the cold-check exactly-once without depending on which events a host fired.
       ensureSeeded(workspace);
@@ -276,6 +285,7 @@ export function createDshHooks(resolve: (agent: DshAgent) => Workspace | undefin
       if (!workspace) return;
       const sessionId = agent.session.header.id;
       liveAgents.set(sessionId, agent);
+      await workspace.ensureDaemon?.(DAEMON_WAIT_RETAIN_MS);
       // The stop boundary is the only moment the completed exchange is readable, so this bypasses
       // the turn cadence exactly like the opencode idle path it shares (`onSessionIdle`).
       await workspace.core.onSessionIdle(sessionId);

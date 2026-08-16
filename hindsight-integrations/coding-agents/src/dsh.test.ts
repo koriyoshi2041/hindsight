@@ -135,6 +135,28 @@ describe("dsh write-back", () => {
 });
 
 describe("dsh session start", () => {
+  it("starts or adopts the local daemon before seeding the workspace", async () => {
+    const calls: string[] = [];
+    const core = {
+      seedIfCold: vi.fn(async () => {
+        calls.push("seed");
+      }),
+    };
+    const workspace = {
+      core: core as never,
+      root: "/repo",
+      ensureDaemon: vi.fn(async () => {
+        calls.push("daemon");
+      }),
+    } as Workspace;
+    const hooks = createDshHooks(() => workspace);
+
+    hooks.sessionStart({ agent: agentWith("s-1") });
+    await vi.waitFor(() => expect(workspace.ensureDaemon).toHaveBeenCalledWith(12_000));
+
+    expect(calls).toEqual(["daemon", "seed"]);
+  });
+
   it("starts the repo seed exactly once, however many sessions open", () => {
     const core = { seedIfCold: vi.fn(async () => {}) };
     const workspace = { core: core as never, root: "/repo" } as Workspace;
