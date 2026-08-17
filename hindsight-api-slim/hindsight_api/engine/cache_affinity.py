@@ -42,6 +42,12 @@ OPENAI_PROMPT_CACHE_KEY_PARAM = "prompt_cache_key"
 # Hosts (exact or parent domain) whose backends implement the xAI header.
 _XAI_DOMAINS = ("x.ai", "grok.com")
 # Hosts (exact or parent domain) that accept OpenAI's prompt_cache_key field.
+# Deliberately excludes openai.azure.com: Azure OpenAI itself accepts the field
+# on GPT deployments, but the same *.openai.azure.com endpoint also fronts
+# non-OpenAI Foundry models (DeepSeek, Llama, Mistral) that reject it with
+# `unrecognized_request_argument` (#3518). The host says nothing about which
+# model family the deployment serves, so `auto` stays off there and an Azure
+# GPT operator opts in with openai_prompt_cache_key.
 _OPENAI_DOMAINS = ("openai.com",)
 
 

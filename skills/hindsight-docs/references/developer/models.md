@@ -688,9 +688,13 @@ export HINDSIGHT_API_LLM_BASE_URL=https://<resource>.openai.azure.com/openai/dep
   directly first to isolate which layer is failing.
 - Gateways and proxies must preserve the same path shape (`/openai/v1` or
   `/openai/deployments/...?api-version=`).
-- Azure does not support OpenAI's `prompt_cache_key` field, so
+- Azure OpenAI accepts `prompt_cache_key` on GPT deployments (it improves cache
+  routing on GPT-5.6 and later), but the same `*.openai.azure.com` endpoint also
+  serves non-OpenAI Foundry models (DeepSeek, Llama, Mistral) that reject it with
+  `unrecognized_request_argument`. The host alone can't tell the two apart, so
   [`HINDSIGHT_API_LLM_CACHE_AFFINITY`](./configuration#llm-provider) resolves
-  `auto` to `none` for Azure hosts.
+  `auto` to `none` for Azure hosts. If your deployment serves an OpenAI model,
+  set it explicitly to `openai_prompt_cache_key`.
 
 ---
 
