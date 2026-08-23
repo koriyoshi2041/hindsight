@@ -765,6 +765,13 @@ class DaemonEmbedManager(EmbedManager):
         if "HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT" not in env:
             env["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] = str(DEFAULT_DAEMON_IDLE_TIMEOUT)
 
+        # Local PyTorch inference can still crash in MPS during unattended
+        # daemon workloads on macOS. Prefer the stable CPU path by default,
+        # while preserving an explicit opt-in to MPS from the caller/profile.
+        if platform.system() == "Darwin":
+            env.setdefault("HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU", "1")
+            env.setdefault("HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU", "1")
+
         # Tell the daemon child it was already launched in a detached session
         # (via our Popen below) so daemonize() skips the redundant re-exec.
         env["_HINDSIGHT_DAEMON_CHILD"] = "1"

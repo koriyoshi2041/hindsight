@@ -304,6 +304,78 @@ def test_profile_env_propagates_arbitrary_hindsight_keys_to_daemon(temp_home, mo
     assert env.get("HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU") == "1"
 
 
+def test_macos_daemon_forces_local_inference_to_cpu_by_default(temp_home, monkeypatch):
+    """macOS daemon children should avoid MPS unless the user opts in."""
+    from unittest.mock import MagicMock, patch
+
+    from hindsight_embed.daemon_embed_manager import DaemonEmbedManager
+
+    monkeypatch.delenv("HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU", raising=False)
+    monkeypatch.delenv("HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU", raising=False)
+    manager = DaemonEmbedManager()
+    captured: dict[str, dict[str, str]] = {}
+    popen_called = [False]
+
+    def fake_popen(cmd, env, **kwargs):
+        captured["env"] = env
+        popen_called[0] = True
+        proc = MagicMock()
+        proc.pid = 12345
+        return proc
+
+    def fake_is_running(profile=""):
+        return popen_called[0]
+
+    with (
+        patch("hindsight_embed.daemon_embed_manager.subprocess.Popen", side_effect=fake_popen),
+        patch("hindsight_embed.daemon_embed_manager.time.sleep"),
+        patch.object(manager, "_clear_port", return_value=True),
+        patch.object(manager, "_find_api_command", return_value=["hindsight-api"]),
+        patch.object(manager, "is_running", side_effect=fake_is_running),
+        patch("hindsight_embed.daemon_embed_manager.platform.system", return_value="Darwin"),
+    ):
+        manager._start_daemon(config={}, profile="")
+
+    assert captured["env"]["HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU"] == "1"
+    assert captured["env"]["HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU"] == "1"
+
+
+def test_macos_daemon_preserves_explicit_mps_opt_in(temp_home, monkeypatch):
+    """Explicit force-CPU overrides must win over the macOS defaults."""
+    from unittest.mock import MagicMock, patch
+
+    from hindsight_embed.daemon_embed_manager import DaemonEmbedManager
+
+    monkeypatch.setenv("HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU", "0")
+    monkeypatch.setenv("HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU", "false")
+    manager = DaemonEmbedManager()
+    captured: dict[str, dict[str, str]] = {}
+    popen_called = [False]
+
+    def fake_popen(cmd, env, **kwargs):
+        captured["env"] = env
+        popen_called[0] = True
+        proc = MagicMock()
+        proc.pid = 12345
+        return proc
+
+    def fake_is_running(profile=""):
+        return popen_called[0]
+
+    with (
+        patch("hindsight_embed.daemon_embed_manager.subprocess.Popen", side_effect=fake_popen),
+        patch("hindsight_embed.daemon_embed_manager.time.sleep"),
+        patch.object(manager, "_clear_port", return_value=True),
+        patch.object(manager, "_find_api_command", return_value=["hindsight-api"]),
+        patch.object(manager, "is_running", side_effect=fake_is_running),
+        patch("hindsight_embed.daemon_embed_manager.platform.system", return_value="Darwin"),
+    ):
+        manager._start_daemon(config={}, profile="")
+
+    assert captured["env"]["HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU"] == "0"
+    assert captured["env"]["HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU"] == "false"
+
+
 def test_daemon_child_env_var_set_in_daemon_env(temp_home, monkeypatch):
     """hindsight-embed must set _HINDSIGHT_DAEMON_CHILD=1 so the daemon child
     skips the redundant re-exec in daemonize()."""
