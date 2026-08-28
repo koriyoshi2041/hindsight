@@ -322,6 +322,8 @@ def _content_or_error(response: Any, *, provider: str, model: str, scope: str) -
     choice = _first_choice_or_error(response, provider=provider, model=model, scope=scope)
     message = _message_for_choice(choice)
     finish_reason = _finish_reason_for_choice(choice)
+    if finish_reason == "length":
+        raise OutputTooLongError("LLM output exceeded token limits. Input may need to be split into smaller chunks.")
     if message is None:
         raise ProviderResponseError(
             f"Provider returned a choice without message ({provider}/{model}, scope={scope}, "

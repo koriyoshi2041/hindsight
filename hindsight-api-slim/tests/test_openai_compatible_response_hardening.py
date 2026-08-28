@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic import BaseModel
 
+from hindsight_api.engine.llm_interface import OutputTooLongError
 from hindsight_api.engine.providers.openai_compatible_llm import (
     OpenAICompatibleLLM,
     ProviderResponseError,
@@ -235,3 +236,21 @@ def test_rate_limit_retry_at_uses_latest_header_or_body_reset(
     assert retry_at is not None
     wait = (retry_at - datetime.now(UTC)).total_seconds()
     assert expected_seconds - 1 < wait <= expected_seconds + 1
+
+
+@pytest.mark.asyncio
+async def test_length_finish_reason_raises_output_too_long_without_retry():
+    llm = _llm()
+    response = _response(content='{"ok":')
+    response.choices[0].finish_reason = "length"
+    create = AsyncMock(return_value=response)
+    llm._client.chat.completions.create = create
+
+    with pytest.raises(OutputTooLongError):
+        await llm.call(
+            messages=[{"role": "user", "content": "Return whether this worked."}],
+            response_format=SimpleJsonResponse,
+            max_retries=2,
+        )
+
+    assert create.await_count == 1
