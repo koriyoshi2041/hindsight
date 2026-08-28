@@ -104,7 +104,7 @@ def load_config_file():
 
     # Load ONLY this profile's config, never fall back to default
     if config_path.exists():
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
