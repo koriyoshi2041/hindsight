@@ -177,8 +177,8 @@ class TestReflectStructuredOutput:
         assert call_kwargs["max_completion_tokens"] == 4096
 
     @pytest.mark.asyncio
-    async def test_structured_output_forwards_reflect_temperature(self, monkeypatch):
-        """Structured extraction uses the configured reflect sampling temperature."""
+    async def test_structured_output_uses_deterministic_temperature(self, monkeypatch):
+        """Structured extraction is deterministic even when reflect generation is not."""
         config = MagicMock(llm_temperature_reflect=0.17, llm_strict_schema_reflect=False)
         monkeypatch.setattr("hindsight_api.engine.reflect.agent.get_config", lambda: config)
         llm = MagicMock()
@@ -195,7 +195,7 @@ class TestReflectStructuredOutput:
             reflect_id="test-reflect",
         )
 
-        assert llm.call.await_args.kwargs["temperature"] == 0.17
+        assert llm.call.await_args.kwargs["temperature"] == 0.0
 
     @pytest.mark.asyncio
     async def test_structured_output_omits_budget_when_unset(self):
