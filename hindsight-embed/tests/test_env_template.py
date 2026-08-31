@@ -66,13 +66,16 @@ def test_template_documents_macos_cpu_workarounds():
 
 
 def test_load_template_reads_bundled_copy_as_utf8(monkeypatch):
+    raw = "# memory — retained\n".encode("utf-8")
+
     class BundledTemplate:
         def is_file(self):
             return True
 
         def read_text(self, *, encoding=None):
-            assert encoding == "utf-8"
-            return "# memory — retained\n"
+            # Mirrors importlib.resources: no encoding means the process locale,
+            # which is a narrow codepage on a legacy Windows install (#3837).
+            return raw.decode(encoding or "ascii")
 
     class PackageFiles:
         def joinpath(self, _name):

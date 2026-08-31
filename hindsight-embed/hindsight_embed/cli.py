@@ -676,7 +676,7 @@ def do_daemon(args, config: dict, logger):
         else:
             # Show last N lines
             try:
-                with open(daemon_log_path) as f:
+                with open(daemon_log_path, encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
                     for line in lines[-args.lines :]:
                         print(line, end="")
@@ -838,7 +838,7 @@ def do_ui(args, config: dict, logger):
             return 0
         else:
             try:
-                with open(ui_log_path) as f:
+                with open(ui_log_path, encoding="utf-8", errors="replace") as f:
                     lines = f.readlines()
                     for line in lines[-args.lines :]:
                         print(line, end="")
@@ -1057,7 +1057,7 @@ def do_control(args) -> int:
             except KeyboardInterrupt:
                 pass
             return 0
-        with open(log_path) as f:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
             for line in f.readlines()[-getattr(args, "lines", 50) :]:
                 print(line, end="")
         return 0
