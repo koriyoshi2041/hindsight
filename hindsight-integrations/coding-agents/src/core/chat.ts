@@ -308,7 +308,8 @@ async function writeSession(
     // the rest of the session. Ambiguous client statuses, timeouts and server failures remain
     // dirty because their commit outcome is unknown.
     const definitivelyRejected =
-      error instanceof HttpResponseError && [400, 401, 403, 405, 413, 415, 422].includes(error.status);
+      error instanceof HttpResponseError &&
+      [400, 401, 403, 405, 413, 415, 422].includes(error.status);
     const current = cursors?.read(sessionId);
     const stillOurs =
       current?.turns === claimed.turns && current?.fingerprint === claimed.fingerprint;
