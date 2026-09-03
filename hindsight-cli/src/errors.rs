@@ -97,6 +97,18 @@ fn format_error_message(err: &anyhow::Error, api_url: &str) -> String {
             );
         }
 
+        if let Some(detail) = response_detail(&err_str) {
+            return format!(
+                "{} {}\n\n{}\n  {}\n\n{}\n  {}",
+                "✗".bright_red().bold(),
+                "Not found (404)".bright_red().bold(),
+                "API URL:".bright_yellow(),
+                api_url.bright_white(),
+                "Server response:".bright_yellow(),
+                detail.bright_white()
+            );
+        }
+
         return format!(
             "{} {}\n\n{}\n  {}\n\n{}\n  • {}\n  • {}\n\n{}\n  {}",
             "✗".bright_red().bold(),
@@ -226,6 +238,16 @@ fn format_error_message(err: &anyhow::Error, api_url: &str) -> String {
     )
 }
 
+fn response_detail(err: &str) -> Option<String> {
+    let body = err.get(err.find('{')?..)?;
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("detail")?
+        .as_str()
+        .filter(|detail| !detail.is_empty())
+        .map(str::to_owned)
+}
+
 pub fn print_config_help() {
     println!("\n{}", "Configuration:".bright_cyan().bold());
     println!("  Run the configure command to set the API URL:");
@@ -259,5 +281,51 @@ mod tests {
 
         assert!(message.contains("Batch operations will timeout in synchronous mode"));
         assert!(!message.contains("Request timed out"));
+    }
+
+    #[test]
+    fn http_404_preserves_structured_detail() {
+        let error = anyhow::anyhow!(
+            "{}",
+            "API request failed (404 Not Found): {\"detail\":\"Document not found\"}"
+        );
+
+        let message = format_error_message(&error, "http://localhost:8888");
+
+        assert!(message.contains("Not found (404)"));
+        assert!(message.contains("Document not found"));
+        assert!(!message.contains("incompatible API version"));
+    }
+
+    #[test]
+    fn http_404_without_detail_keeps_endpoint_guidance() {
+        for error in [
+            anyhow::anyhow!("API request failed (404 Not Found)"),
+            anyhow::anyhow!("API request failed (404 Not Found): not JSON"),
+            anyhow::anyhow!(
+                "{}",
+                "API request failed (404 Not Found): {\"message\":\"missing\"}"
+            ),
+        ] {
+            let message = format_error_message(&error, "http://localhost:8888");
+
+            assert!(message.contains("API endpoint not found (404)"));
+            assert!(message.contains("incompatible API version"));
+        }
+    }
+
+    #[test]
+    fn disabled_bank_api_keeps_specialized_guidance() {
+        let error = anyhow::anyhow!(
+            "{}",
+            "API request failed (404 Not Found): \
+             {\"detail\":\"Bank configuration API is disabled\"}"
+        );
+
+        let message = format_error_message(&error, "http://localhost:8888");
+
+        assert!(message.contains("Bank configuration API is disabled"));
+        assert!(message.contains("HINDSIGHT_API_ENABLE_BANK_CONFIG_API=true"));
+        assert!(!message.contains("Not found (404)"));
     }
 }
