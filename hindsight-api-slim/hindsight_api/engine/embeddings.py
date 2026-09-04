@@ -1943,6 +1943,14 @@ class LiteLLMSDKEmbeddings(Embeddings):
 # without a "google/" or "models/" prefix.
 _GEMINI_AGGREGATING_MODEL_MARKER = "gemini-embedding-2"
 
+# Keep provider-level retries short enough that the worker retains control of
+# the operation budget while absorbing ordinary quota and service blips. The
+# SDK's retry layer is request-scoped, unlike the worker's whole-task retry.
+_GEMINI_EMBEDDING_RETRY_ATTEMPTS = 5
+_GEMINI_EMBEDDING_RETRY_INITIAL_DELAY = 1.0
+_GEMINI_EMBEDDING_RETRY_MAX_DELAY = 10.0
+_GEMINI_EMBEDDING_RETRY_STATUS_CODES = [429, 500, 502, 503, 504]
+
 
 def _gemini_model_aggregates_inputs(model: str) -> bool:
     """Whether the model aggregates a multi-input request into one embedding."""
@@ -2037,7 +2045,14 @@ class GeminiEmbeddings(Embeddings):
         if not self.api_key:
             raise ValueError("Gemini embeddings provider requires an API key")
 
-        client_kwargs = {"api_key": self.api_key}
+        retry_options = genai_types.HttpRetryOptions(
+            attempts=_GEMINI_EMBEDDING_RETRY_ATTEMPTS,
+            initial_delay=_GEMINI_EMBEDDING_RETRY_INITIAL_DELAY,
+            max_delay=_GEMINI_EMBEDDING_RETRY_MAX_DELAY,
+            exp_base=2.0,
+            jitter=1.0,
+            http_status_codes=_GEMINI_EMBEDDING_RETRY_STATUS_CODES,
+        )
         if self.force_ipv4:
             import httpx
 
@@ -2045,12 +2060,15 @@ class GeminiEmbeddings(Embeddings):
                 timeout=10,
                 transport=httpx.HTTPTransport(local_address="0.0.0.0"),
             )
-            client_kwargs["http_options"] = genai_types.HttpOptions(
+            http_options = genai_types.HttpOptions(
+                retry_options=retry_options,
                 timeout=10000,
-                httpxClient=self._httpx_client,
+                httpx_client=self._httpx_client,
             )
+        else:
+            http_options = genai_types.HttpOptions(retry_options=retry_options)
 
-        self._client = genai.Client(**client_kwargs)
+        self._client = genai.Client(api_key=self.api_key, http_options=http_options)
         logger.info(f"Embeddings: initializing Gemini provider with model {self.model}")
 
     def _init_vertexai(self, genai) -> None:
@@ -2087,6 +2105,16 @@ class GeminiEmbeddings(Embeddings):
             "vertexai": True,
             "project": self.vertexai_project_id,
             "location": self.vertexai_region,
+            "http_options": genai.types.HttpOptions(
+                retry_options=genai.types.HttpRetryOptions(
+                    attempts=_GEMINI_EMBEDDING_RETRY_ATTEMPTS,
+                    initial_delay=_GEMINI_EMBEDDING_RETRY_INITIAL_DELAY,
+                    max_delay=_GEMINI_EMBEDDING_RETRY_MAX_DELAY,
+                    exp_base=2.0,
+                    jitter=1.0,
+                    http_status_codes=_GEMINI_EMBEDDING_RETRY_STATUS_CODES,
+                )
+            ),
         }
         if credentials is not None:
             client_kwargs["credentials"] = credentials

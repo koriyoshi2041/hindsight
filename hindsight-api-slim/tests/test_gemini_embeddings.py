@@ -55,6 +55,7 @@ def _make_mock_google_module(mock_genai: MagicMock) -> MagicMock:
     mod.genai = mock_genai
     mod.genai.types.EmbedContentConfig = MagicMock(side_effect=lambda **kw: MagicMock(**kw))
     mod.genai.types.HttpOptions = MagicMock(side_effect=lambda **kw: MagicMock(**kw))
+    mod.genai.types.HttpRetryOptions = MagicMock(side_effect=lambda **kw: MagicMock(**kw))
     return mod
 
 
@@ -104,11 +105,30 @@ class TestGeminiEmbeddings:
         assert emb.dimension == 768
         assert emb.provider_name == "google"
         assert emb._is_vertexai is True
-        mock_genai.Client.assert_called_once_with(
-            vertexai=True,
-            project="test-project",
-            location="us-central1",
+        client_kwargs = mock_genai.Client.call_args.kwargs
+        assert client_kwargs["vertexai"] is True
+        assert client_kwargs["project"] == "test-project"
+        assert client_kwargs["location"] == "us-central1"
+        assert client_kwargs["http_options"].retry_options is not None
+
+    async def test_initialization_configures_bounded_transient_retries(self):
+        """Retry only quota and transient service responses within a bounded budget."""
+        mock_genai = _make_mock_genai()
+        emb = GeminiEmbeddings(model="gemini-embedding-001", api_key="test-key")
+
+        with _patch_google_import(mock_genai):
+            await emb.initialize()
+
+        mock_genai.types.HttpRetryOptions.assert_called_once_with(
+            attempts=5,
+            initial_delay=1.0,
+            max_delay=10.0,
+            exp_base=2.0,
+            jitter=1.0,
+            http_status_codes=[429, 500, 502, 503, 504],
         )
+        retry_options = mock_genai.types.HttpOptions.call_args.kwargs["retry_options"]
+        assert retry_options is not None
 
     async def test_initialization_missing_api_key(self):
         """Test that missing API key raises ValueError when no vertexai_project_id."""
@@ -193,6 +213,10 @@ class TestGeminiEmbeddings:
         mock_http_client.assert_called_once_with(timeout=10, transport=mock_transport)
         assert emb._httpx_client is mock_httpx_client
         assert "http_options" in mock_genai.Client.call_args.kwargs
+        http_options_kwargs = mock_genai.types.HttpOptions.call_args.kwargs
+        assert http_options_kwargs["retry_options"] is not None
+        assert http_options_kwargs["timeout"] == 10000
+        assert http_options_kwargs["httpx_client"] is mock_httpx_client
 
     def test_auto_detect_vertexai(self):
         """Test that _is_vertexai is auto-detected from vertexai_project_id."""
