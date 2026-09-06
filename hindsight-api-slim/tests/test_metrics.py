@@ -57,6 +57,7 @@ class TestNoOpMetricsCollector:
             output_tokens=50,
             success=True,
         )
+        collector.record_consolidation_batch_failure("response_validation")
 
 
 class TestMetricsCollector:
@@ -238,6 +239,14 @@ class TestMetricsCollector:
         assert count == 1
         assert attributes["outcome"] == "facts"
         assert "bank_id" not in attributes  # excluded by default, like every other metric
+
+    def test_record_consolidation_batch_failure_uses_bounded_reason(self, collector):
+        collector.record_consolidation_batch_failure("response_validation")
+
+        count, attributes = collector.consolidation_batch_failures.add.call_args[0]
+        assert count == 1
+        assert attributes["reason"] == "response_validation"
+        assert "tenant" in attributes
 
     def test_record_retain_document_labels_no_facts_outcome(self, collector):
         """A document left with zero memory units is the alertable case (#3040)."""

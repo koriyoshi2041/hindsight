@@ -4,7 +4,6 @@ These tests exercise the real consolidation implementation with actual database 
 Note: Consolidation runs automatically after retain via SyncTaskBackend in tests.
 """
 
-from hindsight_api.engine.response_models import LLMCallResult, TokenUsage
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -26,6 +25,7 @@ from hindsight_api.engine.reflect.tools import (
     tool_search_mental_models,
     tool_search_observations,
 )
+from hindsight_api.engine.response_models import LLMCallResult, TokenUsage
 from tests.llm_judge import assert_meets_criteria
 
 
@@ -2457,6 +2457,71 @@ class TestBuildResponseModel:
         response_model = llm_config.call.await_args.kwargs["response_format"]
         assert response_model is _ConsolidationBatchResponse
         assert len(result.creates) == expected_creates
+
+    @staticmethod
+    def _batch_config(max_attempts: int = 3) -> SimpleNamespace:
+        return SimpleNamespace(
+            llm_output_language=None,
+            observations_mission=None,
+            llm_strict_schema_consolidation=False,
+            llm_supports_max_items=True,
+            consolidation_max_attempts=max_attempts,
+            consolidation_llm_max_retries=None,
+            consolidation_max_completion_tokens=None,
+            llm_temperature_consolidation=0.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_validation_failure_records_one_failed_batch(self) -> None:
+        from pydantic import ValidationError
+        from hindsight_api.engine.consolidation.consolidator import (
+            _ConsolidationBatchResponse,
+            _consolidate_batch_with_llm,
+        )
+
+        try:
+            _ConsolidationBatchResponse.model_validate({"creates": [{"text": "missing ids"}]})
+        except ValidationError as validation_error:
+            error = validation_error
+        metrics = MagicMock()
+        llm_config = SimpleNamespace(_provider_impl=None, call=AsyncMock(side_effect=error))
+
+        with patch("hindsight_api.engine.consolidation.consolidator.get_metrics_collector", return_value=metrics):
+            result = await _consolidate_batch_with_llm(
+                llm_config,
+                [{"id": "fact-0", "text": "a fact"}],
+                [],
+                {},
+                self._batch_config(),
+            )
+
+        assert result.failed is True
+        llm_config.call.assert_awaited_once()
+        metrics.record_consolidation_batch_failure.assert_called_once_with("response_validation")
+
+    @pytest.mark.asyncio
+    async def test_success_does_not_record_failed_batch(self) -> None:
+        from hindsight_api.engine.consolidation.consolidator import (
+            _ConsolidationBatchResponse,
+            _consolidate_batch_with_llm,
+        )
+
+        metrics = MagicMock()
+        llm_config = SimpleNamespace(
+            _provider_impl=None,
+            call=AsyncMock(return_value=LLMCallResult(content=_ConsolidationBatchResponse(), usage=TokenUsage())),
+        )
+        with patch("hindsight_api.engine.consolidation.consolidator.get_metrics_collector", return_value=metrics):
+            result = await _consolidate_batch_with_llm(
+                llm_config,
+                [{"id": "fact-0", "text": "a fact"}],
+                [],
+                {},
+                self._batch_config(),
+            )
+
+        assert result.failed is False
+        metrics.record_consolidation_batch_failure.assert_not_called()
 
 
 class TestDedupeUpdates:

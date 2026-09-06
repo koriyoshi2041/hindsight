@@ -33,6 +33,7 @@ import asyncpg
 from pydantic import BaseModel, ValidationError, field_validator
 
 from ...config import get_config
+from ...metrics import get_metrics_collector
 from ...worker.stage import set_stage
 from ..db import DatabaseBackend
 from ..db_utils import acquire_with_retry
@@ -3242,6 +3243,12 @@ async def _consolidate_batch_with_llm(
         f"[CONSOLIDATION] LLM batch call failed after {attempts_made}/{max_attempts} attempt(s) for "
         f"{batch_label}, skipping batch (the caller will bisect it). Last error: {last_exc}"
     )
+    failure_reason = (
+        "response_validation"
+        if isinstance(last_exc, json.JSONDecodeError | ValidationError | OutputTooLongError)
+        else "provider"
+    )
+    get_metrics_collector().record_consolidation_batch_failure(failure_reason)
     return _BatchLLMResult(
         obs_count=len(union_observations), prompt_chars=len(system_prompt) + len(user_content), failed=True
     )

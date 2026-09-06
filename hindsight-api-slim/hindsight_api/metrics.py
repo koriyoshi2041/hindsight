@@ -296,6 +296,10 @@ class MetricsCollectorBase:
         """Record the fact-extraction outcome of one document processed by retain."""
         raise NotImplementedError
 
+    def record_consolidation_batch_failure(self, reason: str):
+        """Record one exhausted consolidation batch, classified by bounded reason."""
+        raise NotImplementedError
+
     def record_db_acquire_wait(self, wait_seconds: float):
         """Record how long a caller waited to acquire a pooled DB connection."""
         raise NotImplementedError
@@ -375,6 +379,10 @@ class NoOpMetricsCollector(MetricsCollectorBase):
 
     def record_retain_document(self, bank_id: str, memory_unit_count: int):
         """No-op retain document outcome recording."""
+        pass
+
+    def record_consolidation_batch_failure(self, reason: str):
+        """No-op consolidation batch failure recording."""
         pass
 
     def record_db_acquire_wait(self, wait_seconds: float):
@@ -470,6 +478,12 @@ class MetricsCollector(MetricsCollectorBase):
             name="hindsight.retain.documents.total",
             description="Documents processed by retain, labelled by extraction outcome (facts/no_facts)",
             unit="documents",
+        )
+
+        self.consolidation_batch_failures = self.meter.create_counter(
+            name="hindsight.consolidation.batch_failures",
+            description="Consolidation LLM batches that exhausted their retry policy",
+            unit="batches",
         )
 
         # HTTP request metrics
@@ -675,6 +689,14 @@ class MetricsCollector(MetricsCollectorBase):
             attributes["bank_id"] = bank_id
 
         self.retain_documents_total.add(1, attributes)
+
+    def record_consolidation_batch_failure(self, reason: str):
+        """Record one failed batch after its retry policy is exhausted.
+
+        ``reason`` is intentionally a small classifier owned by the consolidator,
+        not an exception message or type, so the metric cannot grow unbounded.
+        """
+        self.consolidation_batch_failures.add(1, {"reason": reason, "tenant": _get_tenant()})
 
     def record_llm_call(
         self,
