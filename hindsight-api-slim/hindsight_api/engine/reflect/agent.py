@@ -18,6 +18,7 @@ from ...config import get_config
 from ..llm_interface import LLM_TOOL_CHOICE_AUTO, LLMToolChoice
 from ..llm_trace import LLMQueueWait, reset_queue_wait_sink, set_queue_wait_sink
 from ..llm_transport import describe_llm_error
+from ..response_models import TokenUsage
 from .models import DirectiveInfo, LLMCall, ReflectAgentResult, StructuredOutputResult, TokenUsageSummary, ToolCall
 from .prompts import (
     _SPLIT_SYNTHESIS_WARN_CHUNKS,
@@ -836,6 +837,26 @@ async def _run_reflect_agent_inner(
                 f"over {len(chunks)} context chunk(s)."
             )
 
+        answer, _, rewrite_usage, rewrite_trace = await _rewrite_final_answer(
+            answer,
+            llm_config,
+            max_tokens,
+        )
+        if rewrite_usage is not None:
+            total_input_tokens += rewrite_usage.input_tokens
+            total_output_tokens += rewrite_usage.output_tokens
+            total_cached_tokens += getattr(rewrite_usage, "cached_tokens", 0) or 0
+            total_thoughts_tokens += getattr(rewrite_usage, "thoughts_tokens", 0) or 0
+        if rewrite_trace is not None:
+            llm_trace.append(
+                {
+                    "scope": rewrite_trace.scope,
+                    "duration_ms": rewrite_trace.duration_ms,
+                    "input_tokens": rewrite_trace.input_tokens,
+                    "output_tokens": rewrite_trace.output_tokens,
+                }
+            )
+
         structured_output = None
         # ``answer`` is non-empty past the guard above, so only the schema gates this.
         if response_schema:
@@ -1340,6 +1361,68 @@ def _document_from_rewrite(rewritten: str, previous_answer: str) -> CanonicalDoc
     return CanonicalDocument(markdown=text, structure=split_markdown(text))
 
 
+async def _rewrite_final_answer(
+    answer: str,
+    llm_config: "LLMProvider | None",
+    max_tokens: int | None,
+    document: StructuredDocument | None = None,
+) -> tuple[str, StructuredDocument | None, TokenUsage | None, LLMCall | None]:
+    """Shorten an over-budget final answer, regardless of how reflect completed."""
+    if llm_config is None or max_tokens is None or count_prompt_tokens(answer) <= max_tokens:
+        return answer, document, None, None
+
+    rewrite_start = time.time()
+    # In document mode the trim is asked for as a document too. Asking for
+    # prose here would put the model back in the business of writing the
+    # markdown that gets stored — on the one path where the answer is long
+    # enough that its structure matters most.
+    if document is not None:
+        rewrite_system = (
+            "Shorten the user's document so it fits within the requested token budget. "
+            "Preserve the key facts and the document's structure; drop lower-priority detail. "
+            'Respond ONLY with JSON: {"sections": [{"heading": "...", "level": 2, '
+            '"blocks": ["...", "..."]}]}. A heading carries no "#", and each block is one '
+            "paragraph, list, table or code fence."
+        )
+        rewrite_user = f"Target budget: {max_tokens} tokens.\n\nDocument to shorten:\n{answer}"
+    else:
+        # The token budget is enforced via the prompt, not a hard provider cap:
+        # on thinking models a hard cap is eaten by reasoning tokens and would
+        # truncate the rewrite mid-word (#3365). Cost is bounded by the separate
+        # reflect_max_completion_tokens config (uncapped by default).
+        rewrite_system = (
+            "Rewrite the user's text so it fits within the requested token budget. "
+            "Preserve the key facts and structure; drop lower-priority detail. "
+            "Respond with the rewritten text only, no preamble."
+        )
+        rewrite_user = f"Target budget: {max_tokens} tokens.\n\nText to rewrite:\n{answer}"
+
+    call_result = await llm_config.call(
+        messages=[
+            {"role": "system", "content": rewrite_system},
+            {"role": "user", "content": rewrite_user},
+        ],
+        scope="reflect",
+        temperature=get_config().llm_temperature_reflect,
+        max_completion_tokens=get_config().reflect_max_completion_tokens,
+    )
+    rewritten = call_result.content
+    if document is not None:
+        trimmed = _document_from_rewrite(rewritten, answer)
+        document, answer = trimmed.structure, trimmed.markdown
+    else:
+        answer = rewritten.strip()
+
+    usage = call_result.usage
+    trace = LLMCall(
+        scope="final_rewrite",
+        duration_ms=int((time.time() - rewrite_start) * 1000),
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+    )
+    return answer, document, usage, trace
+
+
 async def _process_done_tool(
     done_call: "LLMToolCall",
     available_memory_ids: set[str],
@@ -1389,49 +1472,14 @@ async def _process_done_tool(
         )
 
     final_usage = usage
-    if llm_config and max_tokens is not None and count_prompt_tokens(answer) > max_tokens:
-        rewrite_start = time.time()
-        # In document mode the trim is asked for as a document too. Asking for
-        # prose here would put the model back in the business of writing the
-        # markdown that gets stored — on the one path where the answer is long
-        # enough that its structure matters most.
-        if document is not None:
-            rewrite_system = (
-                "Shorten the user's document so it fits within the requested token budget. "
-                "Preserve the key facts and the document's structure; drop lower-priority detail. "
-                'Respond ONLY with JSON: {"sections": [{"heading": "...", "level": 2, '
-                '"blocks": ["...", "..."]}]}. A heading carries no "#", and each block is one '
-                "paragraph, list, table or code fence."
-            )
-            rewrite_user = f"Target budget: {max_tokens} tokens.\n\nDocument to shorten:\n{answer}"
-        else:
-            # The token budget is enforced via the prompt, not a hard provider cap:
-            # on thinking models a hard cap is eaten by reasoning tokens and would
-            # truncate the rewrite mid-word (#3365). Cost is bounded by the separate
-            # reflect_max_completion_tokens config (uncapped by default).
-            rewrite_system = (
-                "Rewrite the user's text so it fits within the requested token budget. "
-                "Preserve the key facts and structure; drop lower-priority detail. "
-                "Respond with the rewritten text only, no preamble."
-            )
-            rewrite_user = f"Target budget: {max_tokens} tokens.\n\nText to rewrite:\n{answer}"
-
-        call_result = await llm_config.call(
-            messages=[
-                {"role": "system", "content": rewrite_system},
-                {"role": "user", "content": rewrite_user},
-            ],
-            scope="reflect",
-            temperature=get_config().llm_temperature_reflect,
-            max_completion_tokens=get_config().reflect_max_completion_tokens,
-        )
-        rewritten = call_result.content
-        rewrite_usage = call_result.usage
-        if document is not None:
-            trimmed = _document_from_rewrite(rewritten, answer)
-            document, answer = trimmed.structure, trimmed.markdown
-        else:
-            answer = rewritten.strip()
+    answer, document, rewrite_usage, rewrite_trace = await _rewrite_final_answer(
+        answer,
+        llm_config,
+        max_tokens,
+        document,
+    )
+    if rewrite_usage is not None:
+        assert rewrite_trace is not None
         final_usage = TokenUsageSummary(
             input_tokens=usage.input_tokens + rewrite_usage.input_tokens,
             output_tokens=usage.output_tokens + rewrite_usage.output_tokens,
@@ -1439,14 +1487,7 @@ async def _process_done_tool(
             cached_tokens=usage.cached_tokens + (getattr(rewrite_usage, "cached_tokens", 0) or 0),
             thoughts_tokens=usage.thoughts_tokens + (getattr(rewrite_usage, "thoughts_tokens", 0) or 0),
         )
-        llm_trace.append(
-            LLMCall(
-                scope="final_rewrite",
-                duration_ms=int((time.time() - rewrite_start) * 1000),
-                input_tokens=rewrite_usage.input_tokens,
-                output_tokens=rewrite_usage.output_tokens,
-            )
-        )
+        llm_trace.append(rewrite_trace)
 
     # Validate IDs (only include IDs that were actually retrieved)
     used_memory_ids = [mid for mid in (args.get("memory_ids") or []) if mid in available_memory_ids]

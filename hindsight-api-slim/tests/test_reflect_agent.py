@@ -1013,6 +1013,54 @@ class TestReflectAgentMocked:
         assert f"approximately {cap} tokens" in final_prompt
 
     @pytest.mark.asyncio
+    async def test_forced_final_synthesis_rewrites_over_budget_answer(self, mock_llm, mock_functions, monkeypatch):
+        config = MagicMock(
+            reflect_prompt_cache_enabled=False,
+            reflect_max_completion_tokens=None,
+            llm_temperature_reflect=0.17,
+        )
+        monkeypatch.setattr("hindsight_api.engine.reflect.agent.get_config", lambda: config)
+        mock_functions["search_mental_models_fn"].return_value = {
+            "mental_models": [{"id": "mm-1", "name": "Prefs", "content": "Fresh content.", "is_stale": False}]
+        }
+        mock_llm.call_with_tools.side_effect = [
+            self._mm_call(),
+            LLMToolCallResult(tool_calls=[], content="I have enough to answer.", finish_reason="stop"),
+        ]
+        mock_llm.call = AsyncMock(
+            side_effect=[
+                LLMCallResult(
+                    content="important detail " * 100,
+                    usage=TokenUsage(input_tokens=40, output_tokens=100, total_tokens=140),
+                ),
+                LLMCallResult(
+                    content="Concise final answer.",
+                    usage=TokenUsage(input_tokens=110, output_tokens=4, total_tokens=114),
+                ),
+            ]
+        )
+
+        result = await run_reflect_agent(
+            llm_config=mock_llm,
+            bank_id="test-bank",
+            query="test query",
+            bank_profile={"name": "Test", "mission": "Testing"},
+            has_mental_models=True,
+            budget="low",
+            max_tokens=8,
+            **mock_functions,
+        )
+
+        assert result.text == "Concise final answer."
+        assert mock_llm.call.await_count == 2
+        rewrite_call = mock_llm.call.await_args_list[1]
+        assert "Target budget: 8 tokens" in rewrite_call.kwargs["messages"][1]["content"]
+        assert rewrite_call.kwargs["max_completion_tokens"] is None
+        assert result.llm_trace[-1].scope == "final_rewrite"
+        assert result.usage.input_tokens == 150
+        assert result.usage.output_tokens == 104
+
+    @pytest.mark.asyncio
     async def test_max_iterations_reached(self, mock_llm, mock_functions):
         """Test that agent stops after max iterations even with errors."""
         # LLM keeps calling unknown tools
