@@ -27,7 +27,12 @@ class EmbeddingsBackend(Protocol):
     def encode_documents(self, texts: list[str]) -> list[list[float]]: ...
 
 
-def _truncate_inputs(texts: list[str], max_input_tokens: int, backend: EmbeddingsBackend) -> list[str]:
+def _truncate_inputs(
+    texts: list[str],
+    max_input_tokens: int,
+    backend: EmbeddingsBackend,
+    input_type: EmbeddingInputType = "document",
+) -> list[str]:
     """Cap each input at ``max_input_tokens`` tokens before it reaches the provider.
 
     Remote providers with a fixed input-token limit (e.g. Bedrock Titan V2's hard 8192
@@ -36,8 +41,17 @@ def _truncate_inputs(texts: list[str], max_input_tokens: int, backend: Embedding
     One oversized memory then fails the whole retain/recall batch. This is provider-
     agnostic on purpose: the cap is applied here, once, before any backend's `encode()`.
     """
-    results = truncate_many_to_tokens(texts, max_input_tokens)
-    truncated = [result.text for result in results]
+    # Plain text-in backends prepend asymmetric-model instructions inside
+    # encode_query()/encode_documents(). Include that prefix in the token budget
+    # here, then remove it before handing the text to the backend so it is added
+    # exactly once. Previously an input truncated to the configured limit could
+    # cross the provider's hard context bound when the prefix was added later.
+    prefix = getattr(backend, "query_prefix" if input_type == "query" else "passage_prefix", "")
+    prefixed_texts = [f"{prefix}{text}" for text in texts] if prefix else texts
+    results = truncate_many_to_tokens(prefixed_texts, max_input_tokens)
+    if prefix and any(not result.text.startswith(prefix) for result in results):
+        raise ValueError(f"embedding input token cap {max_input_tokens} is too small for the configured prefix")
+    truncated = [result.text[len(prefix) :] if prefix else result.text for result in results]
     original_token_counts = [r.original_tokens for r in results if r.original_tokens > max_input_tokens]
     if original_token_counts:
         logger.warning(
@@ -93,7 +107,7 @@ async def generate_embeddings_batch(
     # recall queries, consolidation, import) gets identical, model-agnostic truncation.
     max_input_tokens = get_config().embeddings_max_input_tokens
     if max_input_tokens is not None and texts:
-        texts = _truncate_inputs(texts, max_input_tokens, embeddings_backend)
+        texts = _truncate_inputs(texts, max_input_tokens, embeddings_backend, input_type)
 
     try:
         loop = asyncio.get_event_loop()

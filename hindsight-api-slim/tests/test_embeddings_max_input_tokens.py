@@ -77,6 +77,24 @@ class TestTruncateInputs:
         assert result == ["short text"]
         assert not any("truncated" in r.message for r in caplog.records)
 
+    def test_passage_prefix_is_included_in_cap(self):
+        backend = _FakeBackend()
+        backend.passage_prefix = "passage: "
+        text = "word " * 50
+
+        result = embedding_utils._truncate_inputs([text], 20, backend)
+
+        assert count_tokens(f"{backend.passage_prefix}{result[0]}") <= 20
+
+    def test_query_prefix_is_included_in_cap(self):
+        backend = _FakeBackend()
+        backend.query_prefix = "query: "
+        text = "word " * 50
+
+        result = embedding_utils._truncate_inputs([text], 20, backend, "query")
+
+        assert count_tokens(f"{backend.query_prefix}{result[0]}") <= 20
+
 
 @pytest.mark.asyncio
 class TestGenerateEmbeddingsBatch:
@@ -97,6 +115,15 @@ class TestGenerateEmbeddingsBatch:
             await embedding_utils.generate_embeddings_batch(backend, [long_text])
 
         assert backend.received == [long_text]
+
+    async def test_cap_accounts_for_prefix_added_by_backend(self):
+        backend = _FakeBackend()
+        backend.passage_prefix = "passage: "
+        long_text = "word " * 500
+        with _patch_cap(50):
+            await embedding_utils.generate_embeddings_batch(backend, [long_text])
+
+        assert count_tokens(f"{backend.passage_prefix}{backend.received[0]}") <= 50
 
 
 class TestConfigWiring:
