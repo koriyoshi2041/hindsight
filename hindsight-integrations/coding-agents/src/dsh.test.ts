@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createDshHooks, dshSessionEvents, toDshParameters, type Workspace } from "./dsh";
+import { createDshHooks, dshSessionEvents, inject, toDshParameters, type Workspace } from "./dsh";
 import { readDshEvents } from "./core/transcript-dsh";
 import type { ToolSpec } from "./core/knowledge-tools";
 import { z } from "zod";
@@ -31,6 +31,12 @@ function fakeWorkspace(core: Partial<Workspace["core"]>): Workspace {
 }
 
 const enter = (messages: unknown[]) => async () => ({ kind: "enter" as const, messages }) as never;
+
+describe("dsh plugin dependencies", () => {
+  it("waits for the tool registry before mounting", () => {
+    expect(inject).toEqual(["agents", "tools"]);
+  });
+});
 
 describe("dsh pre-step injection", () => {
   it("recalls on the human prompt and appends the memory as a sourced message", async () => {

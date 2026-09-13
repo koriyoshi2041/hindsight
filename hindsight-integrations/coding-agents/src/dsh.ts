@@ -35,8 +35,8 @@ const HARNESS = "dsh";
 /** Cordis plugin name (loader diagnostics, and the `source.plugin` on everything we inject). */
 export const name = HINDSIGHT_PLUGIN;
 
-/** The agent registry owns the lifecycle events below; without it there is nothing to bind. */
-export const inject = ["agents"];
+/** Both services must exist before mount so the first model request sees the final tool catalog. */
+export const inject = ["agents", "tools"];
 
 // ── host shapes (structural: this package must not depend on dsh's packages) ─────
 
@@ -74,6 +74,7 @@ interface PreStepPayload {
 
 /** The Cordis context surface this plugin uses. */
 interface DshContext {
+  tools: DshToolContext["tools"];
   on(
     event: "agent/session-start",
     listener: (payload: { agent: DshAgent }) => void
@@ -94,7 +95,6 @@ interface DshContext {
     event: "agent/disposed",
     listener: (payload: { agent: DshAgent }) => void
   ): (() => void) | void;
-  inject(names: string[], callback: (ctx: DshToolContext) => void): void;
 }
 
 interface DshToolContext {
@@ -408,11 +408,10 @@ export function apply(ctx: DshContext): void {
   ctx.on("agent/pre-step", hooks.preStep, { prepend: true });
   ctx.on("agent/turn-stopping", hooks.turnStopping);
   ctx.on("agent/disposed", hooks.disposed);
-  // The tools registry is optional: a composition without it (a bare headless assembly) still gets
-  // recall, injection and write-back.
-  ctx.inject(["tools"], (toolCtx) => {
-    registerTools(toolCtx, process.cwd());
-  });
+  // `tools` is a static plugin dependency, so Cordis does not mount us until the registry exists.
+  // Registering here keeps the catalog stable from the first request instead of growing it later
+  // when a nested dependency callback happens to resolve.
+  registerTools(ctx, process.cwd());
 }
 
 export default { name, inject, apply };
