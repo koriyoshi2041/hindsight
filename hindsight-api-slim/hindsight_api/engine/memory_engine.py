@@ -20961,6 +20961,7 @@ class MemoryEngine(MemoryEngineInterface):
                 bank_id=bank_id,
                 contents=[dict(c) for c in contents],
                 request_context=request_context,
+                document_id=contents[0].get("document_id") if len(contents) == 1 else None,
             )
             result = await self._validate_operation(self._operation_validator.validate_retain(ctx))
             if result and result.contents is not None:

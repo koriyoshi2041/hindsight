@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hindsight_api.engine.memory_engine import MemoryEngine
+from hindsight_api.extensions import ValidationResult
 from hindsight_api.models import RequestContext
 
 
@@ -24,7 +25,8 @@ async def test_submit_async_retain_includes_document_tags_in_task_payload():
     engine = MemoryEngine.__new__(MemoryEngine)
     engine._initialized = True
     engine._authenticate_tenant = AsyncMock()
-    engine._operation_validator = None
+    engine._operation_validator = MagicMock()
+    engine._operation_validator.validate_retain = AsyncMock(return_value=ValidationResult.accept())
     # Children are now inserted inline (no _submit_async_operation hop), and
     # submit_task fires post-commit. Mock both so the inline path runs cleanly
     # without the test needing real DB or task backend.
@@ -53,7 +55,8 @@ async def test_submit_async_retain_includes_document_tags_in_task_payload():
     mock_pool._wraps_backend = False
 
     request_context = RequestContext(tenant_id="tenant-a", api_key_id="key-a")
-    contents = [{"content": "Async retain payload test."}]
+    document_id = "conversation:hermes::sess-1"
+    contents = [{"content": "Async retain payload test.", "document_id": document_id}]
     document_tags = ["scope:tools", "user:alice"]
 
     # Stub the lazy bank-create/default-template hook to a no-op (created=False)
@@ -76,6 +79,9 @@ async def test_submit_async_retain_includes_document_tags_in_task_payload():
 
     # Verify authentication was called
     engine._authenticate_tenant.assert_awaited_once_with(request_context)
+
+    validator_context = engine._operation_validator.validate_retain.await_args.args[0]
+    assert validator_context.document_id == document_id
 
     # The parent + child INSERTs both went through mock_conn.execute. There
     # should be exactly two: one for the parent (no task_payload), one for the
