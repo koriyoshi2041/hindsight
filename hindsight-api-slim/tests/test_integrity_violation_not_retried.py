@@ -13,6 +13,7 @@ and marks the operation as failed on the first occurrence.
 """
 
 import json
+import sys
 import uuid
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -164,6 +165,38 @@ def test_invalid_embedding_dimension_error_is_non_retryable(message):
     from hindsight_api.engine.memory_engine import _is_non_retryable_task_error
 
     assert _is_non_retryable_task_error(RuntimeError(message)) is True
+
+
+@pytest.mark.parametrize("code", [2291, 2292])
+def test_oracle_foreign_key_violation_is_retried(code, monkeypatch):
+    """Oracle foreign-key races use the retry path, like PostgreSQL FKs."""
+    from hindsight_api.engine.memory_engine import _is_non_retryable_task_error
+
+    class FakeIntegrityError(Exception):
+        pass
+
+    fake_oracledb = SimpleNamespace(IntegrityError=FakeIntegrityError)
+    monkeypatch.setitem(sys.modules, "oracledb", fake_oracledb)
+
+    error = FakeIntegrityError(SimpleNamespace(code=code, message="foreign key violation"))
+
+    assert _is_non_retryable_task_error(error) is False
+
+
+@pytest.mark.parametrize("code", [1, 1400, 1438, 2290, 21525, 40479])
+def test_other_oracle_integrity_violations_are_non_retryable(code, monkeypatch):
+    """Only Oracle FK codes are exempted from terminal integrity handling."""
+    from hindsight_api.engine.memory_engine import _is_non_retryable_task_error
+
+    class FakeIntegrityError(Exception):
+        pass
+
+    fake_oracledb = SimpleNamespace(IntegrityError=FakeIntegrityError)
+    monkeypatch.setitem(sys.modules, "oracledb", fake_oracledb)
+
+    error = FakeIntegrityError(SimpleNamespace(code=code, message="integrity violation"))
+
+    assert _is_non_retryable_task_error(error) is True
 
 
 class _AsyncNullCtx:
