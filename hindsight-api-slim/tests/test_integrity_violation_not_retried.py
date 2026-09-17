@@ -2,7 +2,7 @@
 Regression tests for vectorize-io/hindsight#980.
 
 Deterministic Postgres integrity-constraint violations (UniqueViolationError,
-ForeignKeyViolationError, CheckViolationError, NotNullViolationError,
+CheckViolationError, NotNullViolationError,
 ExclusionViolationError) must NOT be retried by the worker — they will never
 succeed on retry, and retrying just burns worker capacity for ~3 minutes
 (3 retries × 60s) before finally giving up.
@@ -108,11 +108,10 @@ async def test_unique_violation_marks_failed_without_retry(memory):
 
 
 @pytest.mark.asyncio
-async def test_foreign_key_violation_also_not_retried(memory):
+async def test_foreign_key_violation_is_retried(memory):
     """
-    All subclasses of IntegrityConstraintViolationError are non-retryable —
-    verify ForeignKeyViolationError is classified the same way as
-    UniqueViolationError.
+    A foreign-key violation can be a transient parent-delete/child-insert race,
+    so it must use the worker retry path rather than becoming terminal.
     """
     bank_id = f"test-worker-{uuid.uuid4().hex[:8]}"
     operation_id = uuid.uuid4()
@@ -133,16 +132,14 @@ async def test_foreign_key_violation_also_not_retried(memory):
     }
 
     with patch.object(memory, "_handle_batch_retain", side_effect=fk_violation):
-        try:
+        with pytest.raises(RetryTaskAt):
             await memory.execute_task(task_dict)
-        except RetryTaskAt as exc:
-            pytest.fail(f"ForeignKeyViolationError must not be retried, but execute_task raised {exc!r}")
 
     row = await pool.fetchrow(
         "SELECT status FROM async_operations WHERE operation_id = $1",
         operation_id,
     )
-    assert row["status"] == "failed"
+    assert row["status"] == "pending"
 
     await pool.execute("DELETE FROM async_operations WHERE operation_id = $1", operation_id)
     await pool.execute("DELETE FROM banks WHERE bank_id = $1", bank_id)

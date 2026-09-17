@@ -1393,7 +1393,13 @@ def _entity_map_from_results(
 def _is_non_retryable_task_error(e: Exception) -> bool:
     """Classify deterministic task failures that should skip worker retry."""
     return (
-        isinstance(e, asyncpg.exceptions.IntegrityConstraintViolationError)
+        (
+            isinstance(e, asyncpg.exceptions.IntegrityConstraintViolationError)
+            # A parent delete can lose a race with a concurrent child insert.
+            # Retrying after the overlapping transaction finishes succeeds, so
+            # do not turn every PostgreSQL foreign-key violation terminal.
+            and not isinstance(e, asyncpg.exceptions.ForeignKeyViolationError)
+        )
         or _is_oracledb_integrity_error(e)
         or _is_invalid_embedding_dimension_error(e)
         # A provider content-policy refusal is a function of the content, not of
