@@ -3866,6 +3866,11 @@ def load_default_bank_template_manifest() -> "BankTemplateManifest | None":
     return manifest
 
 
+def _recall_query_exceeds_token_limit(query_tokens: int, max_query_tokens: int) -> bool:
+    """Return whether the REST recall query exceeds its enabled token cap."""
+    return max_query_tokens > 0 and query_tokens > max_query_tokens
+
+
 async def apply_bank_template_manifest(
     memory: MemoryEngine,
     bank_id: str,
@@ -5764,7 +5769,7 @@ def _register_routes(app: FastAPI):
         # Validate query length to prevent expensive operations on oversized queries
         max_query_tokens = get_config().recall_max_query_tokens
         query_tokens = count_tokens(request.query)
-        if query_tokens > max_query_tokens:
+        if _recall_query_exceeds_token_limit(query_tokens, max_query_tokens):
             raise HTTPException(
                 status_code=400,
                 detail=f"Query too long: {query_tokens} tokens exceeds maximum of {max_query_tokens}. Please shorten your query.",

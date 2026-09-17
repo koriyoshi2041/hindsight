@@ -7,12 +7,13 @@ extraction — 58k words, 4 distinct — became a 54k-term OR `tsquery` whose ev
 exceeded Postgres' stack depth (SQLSTATE 54001).
 """
 
+from hindsight_api.api.http import _recall_query_exceeds_token_limit
 from hindsight_api.engine.memory_engine import (
     _truncate_query_to_token_limit,
     count_tokens,
 )
-from hindsight_api.engine.token_encoding import _load_encoding
 from hindsight_api.engine.search.retrieval import tokenize_query
+from hindsight_api.engine.token_encoding import _load_encoding
 
 
 def test_short_query_is_returned_unchanged():
@@ -45,6 +46,16 @@ def test_long_query_is_truncated_to_the_cap():
 def test_zero_disables_the_cap():
     query = "alpha beta gamma delta " * 500
     assert _truncate_query_to_token_limit(query, 0) is query
+
+
+def test_zero_disables_the_http_cap():
+    query = "alpha beta gamma delta " * 500
+    assert not _recall_query_exceeds_token_limit(count_tokens(query), 0)
+
+
+def test_http_cap_still_rejects_oversized_queries():
+    query = "alpha beta gamma delta " * 500
+    assert _recall_query_exceeds_token_limit(count_tokens(query), 500)
 
 
 def test_degenerate_repetition_stays_far_below_the_tsquery_stack_cliff():
