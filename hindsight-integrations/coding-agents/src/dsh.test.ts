@@ -52,7 +52,7 @@ describe("dsh pre-step injection", () => {
     expect(appended).toMatchObject({
       role: "user",
       content: [{ type: "text", text: "<hindsight_memory>past decision</hindsight_memory>" }],
-      source: { kind: "plugin", plugin: "hindsight", form: "recall" },
+      source: { kind: "plugin:hindsight", form: "recall" },
     });
     expect(appended.id).toEqual(expect.any(String));
   });
