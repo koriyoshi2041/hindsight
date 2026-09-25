@@ -870,7 +870,7 @@ export function MemoryStoreCard({
                 },
                 {
                   name: t("causal"),
-                  value: getCausalLinkCount(stats.links_by_link_type),
+                  value: getCausalLinkCount(stats.links_by_link_type ?? {}),
                   color: CHART_COLORS.causal,
                 },
               ]}
