@@ -566,21 +566,13 @@ def apply_operations(
         return Block(id=block_id, text=normalized)
 
     def resolve_section_anchor(anchor: str) -> int | None:
-        assigned_id = added_section_ids.get(anchor)
-        if assigned_id is not None:
-            return new_doc.section_index(assigned_id)
-
-        index = new_doc.section_index(anchor)
-        if index is not None:
-            return index
-
-        # Prompts display both headings and ids, and models sometimes copy the
-        # human-readable heading. Slug fallback is deterministic while the
-        # exact-heading fallback also covers explicit non-slug section ids.
-        slug = slugify_heading(anchor)
-        index = new_doc.section_index(slug)
-        if index is not None:
-            return index
+        # An exact id always wins. After that, models often copy the
+        # human-readable heading instead of the id: try the id assigned to a
+        # section added earlier in this batch, then the slug, then the heading
+        # itself (which covers sections whose id is not their slug).
+        for candidate in (anchor, added_section_ids.get(anchor), slugify_heading(anchor)):
+            if candidate is not None and (index := new_doc.section_index(candidate)) is not None:
+                return index
         return next((i for i, section in enumerate(new_doc.sections) if section.heading == anchor), None)
 
     def resolve_block(op: Operation, section: Section, block_id: str) -> int | None:

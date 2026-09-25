@@ -454,6 +454,30 @@ class TestApplyOperations:
         assert [s.id for s in outcome.document.sections][-2:] == ["members-2", "tools"]
         assert [entry["assigned_id"] for entry in outcome.applied] == ["members-2", "tools"]
 
+    def test_add_section_resolves_heading_of_section_with_non_slug_id(self):
+        # A previous refresh gave "Service A" an explicit id; this one only knows its heading.
+        doc = apply_operations(_doc(), [AddSectionOp(heading="Service A", blocks=["a"], new_id="svc-a")]).document
+        outcome = apply_operations(doc, [AddSectionOp(heading="Service B", blocks=["b"], after_section_id="Service A")])
+        assert [s.id for s in outcome.document.sections][-2:] == ["svc-a", "service-b"]
+        assert outcome.skipped == []
+
+    def test_add_section_exact_id_beats_same_batch_heading(self):
+        doc = _doc()
+        outcome = apply_operations(
+            doc,
+            [
+                AddSectionOp(heading="members", blocks=["new group"]),
+                AddSectionOp(heading="Tools", blocks=["x"], after_section_id="members"),
+            ],
+        )
+        assert [s.id for s in outcome.document.sections] == [
+            "team-overview",
+            "members",
+            "tools",
+            "cadence",
+            "members-2",
+        ]
+
     def test_add_section_disambiguates_colliding_id(self):
         doc = _doc()
         outcome = apply_operations(doc, [AddSectionOp(heading="Members", blocks=["x"])])
