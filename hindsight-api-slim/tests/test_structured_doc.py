@@ -434,6 +434,26 @@ class TestApplyOperations:
         outcome = apply_operations(doc, [AddSectionOp(heading="Tools", blocks=["x"], after_section_id="members")])
         assert [s.id for s in outcome.document.sections] == ["team-overview", "members", "tools", "cadence"]
 
+    def test_add_section_resolves_existing_heading_anchor(self):
+        doc = _doc()
+        outcome = apply_operations(
+            doc,
+            [AddSectionOp(heading="Tools", blocks=["x"], after_section_id="Team Overview")],
+        )
+        assert [s.id for s in outcome.document.sections] == ["team-overview", "tools", "members", "cadence"]
+
+    def test_add_section_chains_after_heading_created_in_same_batch(self):
+        doc = _doc()
+        outcome = apply_operations(
+            doc,
+            [
+                AddSectionOp(heading="Members", blocks=["new group"]),
+                AddSectionOp(heading="Tools", blocks=["x"], after_section_id="Members"),
+            ],
+        )
+        assert [s.id for s in outcome.document.sections][-2:] == ["members-2", "tools"]
+        assert [entry["assigned_id"] for entry in outcome.applied] == ["members-2", "tools"]
+
     def test_add_section_disambiguates_colliding_id(self):
         doc = _doc()
         outcome = apply_operations(doc, [AddSectionOp(heading="Members", blocks=["x"])])

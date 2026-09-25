@@ -548,6 +548,10 @@ def apply_operations(
     # owned one is later removed, so two ops in the same batch can never be
     # given the same id.
     reserved_ids: set[str] = set(new_doc.block_ids())
+    # The model only sees a new section's heading when it emits a batch, not
+    # the collision-safe id assigned below. Remember headings created earlier
+    # in this batch so a chain of add_section operations can target them.
+    added_section_ids: dict[str, str] = {}
 
     def skip(op: Operation, reason: str) -> None:
         entry = _op_summary(op)
@@ -560,6 +564,24 @@ def apply_operations(
         block_id = make_block_id(normalized, reserved_ids)
         reserved_ids.add(block_id)
         return Block(id=block_id, text=normalized)
+
+    def resolve_section_anchor(anchor: str) -> int | None:
+        assigned_id = added_section_ids.get(anchor)
+        if assigned_id is not None:
+            return new_doc.section_index(assigned_id)
+
+        index = new_doc.section_index(anchor)
+        if index is not None:
+            return index
+
+        # Prompts display both headings and ids, and models sometimes copy the
+        # human-readable heading. Slug fallback is deterministic while the
+        # exact-heading fallback also covers explicit non-slug section ids.
+        slug = slugify_heading(anchor)
+        index = new_doc.section_index(slug)
+        if index is not None:
+            return index
+        return next((i for i, section in enumerate(new_doc.sections) if section.heading == anchor), None)
 
     def resolve_block(op: Operation, section: Section, block_id: str) -> int | None:
         index = section.block_index(block_id)
@@ -673,7 +695,7 @@ def apply_operations(
             if op.after_section_id is None:
                 new_doc.sections.append(new_section)
             else:
-                idx = new_doc.section_index(op.after_section_id)
+                idx = resolve_section_anchor(op.after_section_id)
                 if idx is None:
                     skip(op, f"unknown after_section_id: {op.after_section_id}")
                     continue
@@ -681,6 +703,9 @@ def apply_operations(
             entry = _op_summary(op)
             entry["assigned_id"] = section_id
             applied.append(entry)
+            added_section_ids[op.heading] = section_id
+            if op.new_id is not None:
+                added_section_ids[op.new_id] = section_id
             continue
 
         if isinstance(op, RemoveSectionOp):
