@@ -86,13 +86,26 @@ def _extract_map_entities(
                 existing_texts_lower.add(label_str.lower())
 
 
-def _infer_temporal_date(fact_text: str, event_date: datetime | None) -> str | None:
+def _infer_temporal_date(fact_text: str, event_date: datetime | None, when: str | None = None) -> str | None:
     """
     Infer a temporal date from fact text when LLM didn't provide occurred_start.
 
-    This is a fallback for when the LLM fails to extract temporal information
-    from relative time expressions like "last night", "yesterday", etc.
+    This is a fallback for when the LLM fails to extract temporal information.
+    Prefer an absolute ISO date already returned in the structured ``when``
+    field, then resolve relative expressions against the retain timestamp.
     """
+    if when:
+        # Some grammar-constrained models omit optional occurred_* keys while
+        # still returning the event date in the required `when` dimension.
+        iso_match = re.search(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)", when)
+        if iso_match:
+            try:
+                datetime.fromisoformat(iso_match.group(1))
+            except ValueError:
+                pass
+            else:
+                return iso_match.group(1)
+
     if event_date is None:
         return None
 
@@ -2285,7 +2298,7 @@ async def _extract_facts_from_chunk(
 
                     # If LLM didn't set temporal fields, try to extract them from the fact text
                     if not occurred_start:
-                        fact_data["occurred_start"] = _infer_temporal_date(combined_text, event_date)
+                        fact_data["occurred_start"] = _infer_temporal_date(combined_text, event_date, when)
                     else:
                         fact_data["occurred_start"] = occurred_start
 
@@ -3257,7 +3270,7 @@ async def extract_facts_from_contents_batch_api(
                 occurred_end = get_value("occurred_end")
 
                 if not occurred_start:
-                    fact_data["occurred_start"] = _infer_temporal_date(combined_text, event_date)
+                    fact_data["occurred_start"] = _infer_temporal_date(combined_text, event_date, when)
                 else:
                     fact_data["occurred_start"] = occurred_start
 
