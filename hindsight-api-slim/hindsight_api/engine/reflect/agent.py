@@ -838,6 +838,10 @@ async def _run_reflect_agent_inner(
     available_memory_ids: set[str] = set()
     available_mental_model_ids: set[str] = set()
     available_observation_ids: set[str] = set()
+    # A successful retrieval may legitimately return no records. Keep that state
+    # separate from the citable IDs above so an empty result is not mistaken for
+    # a model that tried to answer without searching at all (#5702).
+    successful_retrieval = False
 
     def _get_llm_trace() -> list[LLMCall]:
         return [
@@ -1628,7 +1632,7 @@ async def _run_reflect_agent_inner(
         done_call = next((tc for tc in result.tool_calls if _is_done_tool(tc.name)), None)
         if done_call:
             # Guardrail: Require evidence before done
-            has_gathered_evidence = (
+            has_gathered_evidence = successful_retrieval or (
                 bool(available_memory_ids) or bool(available_mental_model_ids) or bool(available_observation_ids)
             )
             if not has_gathered_evidence and iteration < max_iterations - 1:
@@ -1931,6 +1935,17 @@ async def _run_reflect_agent_inner(
                     logger.warning(
                         f"[REFLECT {reflect_id}] Tool {normalized_tool_name} returned error: {output['error']}"
                     )
+
+                if (
+                    isinstance(output, dict)
+                    and "error" not in output
+                    and (
+                        (normalized_tool_name == "search_mental_models" and "mental_models" in output)
+                        or (normalized_tool_name == "search_observations" and "observations" in output)
+                        or (normalized_tool_name == "recall" and "memories" in output)
+                    )
+                ):
+                    successful_retrieval = True
 
                 # Track available IDs from tool results (only for successful responses)
                 if (

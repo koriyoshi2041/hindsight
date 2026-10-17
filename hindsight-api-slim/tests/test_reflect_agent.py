@@ -381,6 +381,72 @@ class TestReflectAgentMocked:
         )
 
     @pytest.mark.asyncio
+    async def test_done_is_accepted_after_successful_empty_retrieval(self, mock_llm, mock_functions):
+        """An empty result proves retrieval ran; it is not the same as skipping retrieval."""
+        mock_functions["recall_fn"].return_value = {"memories": [], "chunks": {}}
+        recall = LLMToolCallResult(
+            tool_calls=[LLMToolCall(id="1", name="recall", arguments={"query": "missing"})],
+            finish_reason="tool_calls",
+        )
+        done = LLMToolCallResult(
+            tool_calls=[LLMToolCall(id="2", name="done", arguments={"answer": "No evidence was found."})],
+            finish_reason="tool_calls",
+        )
+        mock_llm.call_with_tools.side_effect = closing_echo([recall, done])
+
+        result = await run_reflect_agent(
+            llm_config=mock_llm,
+            bank_id="test-bank",
+            query="What is the missing status?",
+            bank_profile={"name": "Test", "mission": "Testing"},
+            has_mental_models=False,
+            include_observations=False,
+            include_recall=True,
+            budget="low",
+            max_iterations=5,
+            **mock_functions,
+        )
+
+        assert result.text == "No evidence was found."
+        assert mock_llm.call_with_tools.await_count == 3  # recall, done, closing done
+        closing_messages = mock_llm.call_with_tools.await_args_list[-1].kwargs["messages"]
+        assert not any("You must search for information first" in str(message) for message in closing_messages)
+
+    @pytest.mark.asyncio
+    async def test_malformed_retrieval_result_does_not_satisfy_done_guard(self, mock_llm, mock_functions):
+        """A callback result without the retrieval payload is not proof that retrieval succeeded."""
+        mock_functions["recall_fn"].return_value = {"unexpected": []}
+        recall = LLMToolCallResult(
+            tool_calls=[LLMToolCall(id="1", name="recall", arguments={"query": "missing"})],
+            finish_reason="tool_calls",
+        )
+        first_done = LLMToolCallResult(
+            tool_calls=[LLMToolCall(id="2", name="done", arguments={"answer": "No evidence."})],
+            finish_reason="tool_calls",
+        )
+        second_done = LLMToolCallResult(
+            tool_calls=[LLMToolCall(id="3", name="done", arguments={"answer": "No evidence."})],
+            finish_reason="tool_calls",
+        )
+        mock_llm.call_with_tools.side_effect = closing_echo([recall, first_done, second_done])
+
+        await run_reflect_agent(
+            llm_config=mock_llm,
+            bank_id="test-bank",
+            query="What is the missing status?",
+            bank_profile={"name": "Test", "mission": "Testing"},
+            has_mental_models=False,
+            include_observations=False,
+            include_recall=True,
+            budget="low",
+            max_iterations=5,
+            **mock_functions,
+        )
+
+        retry_messages = mock_llm.call_with_tools.await_args_list[2].kwargs["messages"]
+        assert any("You must search for information first" in str(message) for message in retry_messages)
+
+    @pytest.mark.asyncio
     async def test_fresh_mental_model_releases_forced_retrieval(self, mock_llm, mock_functions):
         """A fresh, usable mental model stops forced lower-level retrieval — with no extra LLM call.
 
