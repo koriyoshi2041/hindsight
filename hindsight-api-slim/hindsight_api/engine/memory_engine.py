@@ -12054,20 +12054,19 @@ class MemoryEngine(MemoryEngineInterface):
 
                 deleted_count = await self._delete_stale_observations_for_memories(conn, bank_id, [memory_id])
 
-                # Also reset this memory's own consolidated_at so it gets re-consolidated
-                # (the memory was a source for the deleted observations, so it needs new ones).
+                # This endpoint is an explicit reset request, so requeue the source even when it
+                # has no derived observations. Previously the deletion count gated the reset and
+                # left a zero-observation source permanently marked as consolidated (#5731).
                 # Bookkeeping only: `updated_at` stays put (see META_UPDATED_AT).
-                if deleted_count > 0:
-                    from .memories import get_memories
+                from .memories import get_memories
 
-                    await get_memories().requeue_source_memory(
-                        conn=conn, fq_table=fq_table, bank_id=bank_id, unit_id=uuid_module.UUID(memory_id)
-                    )
+                await get_memories().requeue_source_memory(
+                    conn=conn, fq_table=fq_table, bank_id=bank_id, unit_id=uuid_module.UUID(memory_id)
+                )
 
-        if deleted_count > 0:
-            config = await self._config_resolver.resolve_full_config(bank_id, request_context)
-            if config.enable_auto_consolidation:
-                await self.submit_async_consolidation(bank_id=bank_id, request_context=request_context)
+        config = await self._config_resolver.resolve_full_config(bank_id, request_context)
+        if config.enable_auto_consolidation:
+            await self.submit_async_consolidation(bank_id=bank_id, request_context=request_context)
 
         return {"deleted_count": deleted_count}
 

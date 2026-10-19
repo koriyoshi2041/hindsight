@@ -712,8 +712,8 @@ class TestClearObservationsForMemory:
         await memory.delete_bank(bank_id, request_context=request_context)
 
     @pytest.mark.asyncio
-    async def test_no_observations_returns_zero(self, memory: MemoryEngine, request_context: RequestContext):
-        """Returns 0 when the memory has no associated observations."""
+    async def test_no_observations_resets_source(self, memory: MemoryEngine, request_context: RequestContext):
+        """An explicit clear resets the source even when no observations were deleted."""
         bank_id = f"test-clear-obs-noop-{uuid.uuid4().hex[:8]}"
         await _ensure_bank(memory, bank_id, request_context)
 
@@ -721,13 +721,15 @@ class TestClearObservationsForMemory:
         async with pool.acquire() as conn:
             m1 = await _insert_memory(memory, conn, bank_id, "Alice loves hiking.")
 
-        result = await memory.clear_observations_for_memory(bank_id, str(m1), request_context=request_context)
+        with patch.object(memory, "submit_async_consolidation", new=AsyncMock()) as submit:
+            result = await memory.clear_observations_for_memory(bank_id, str(m1), request_context=request_context)
 
         assert result["deleted_count"] == 0
 
         async with pool.acquire() as conn:
-            # Memory should still be consolidated (no observations were cleared)
-            assert await _get_consolidated_at(conn, m1, bank_id) is not None
+            assert await _get_consolidated_at(conn, m1, bank_id) is None
+
+        submit.assert_awaited_once_with(bank_id=bank_id, request_context=request_context)
 
         await memory.delete_bank(bank_id, request_context=request_context)
 
