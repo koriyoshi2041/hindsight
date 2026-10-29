@@ -54,6 +54,7 @@ from .schema import (
     SCHEMA_VERSION,
     BankRowsJSONEncoding,
     TransferAttachment,
+    TransferChunk,
     TransferDocument,
     TransferFact,
     TransferKnowledgePage,
@@ -1541,6 +1542,11 @@ class _PreparedDocument:
     chunk_meta: list[ChunkMetadata]
 
 
+def _deduplicate_chunks(document: TransferDocument) -> list[TransferChunk]:
+    """Return one archive chunk per logical index, preferring the last archive row."""
+    return list({chunk.chunk_index: chunk for chunk in document.chunks}.values())
+
+
 async def _prepare_documents(
     embeddings_model: Any, format_date_fn: Any, batch: list[tuple[TransferDocument, str]]
 ) -> list[_PreparedDocument]:
@@ -1572,7 +1578,7 @@ async def _prepare_documents(
                     ChunkMetadata(
                         chunk_text=chunk.chunk_text, fact_count=0, content_index=0, chunk_index=chunk.chunk_index
                     )
-                    for chunk in document.chunks
+                    for chunk in _deduplicate_chunks(document)
                 ],
             )
         )
@@ -1838,7 +1844,7 @@ async def _write_document_to_store(
                 document_body=text,
                 content_hash=content_hash,
                 chunk_offset=0,
-                chunk_texts=[c.chunk_text for c in sorted(document.chunks, key=lambda c: c.chunk_index)],
+                chunk_texts=[c.chunk_text for c in sorted(_deduplicate_chunks(document), key=lambda c: c.chunk_index)],
                 facts=[],
                 tags=list(document.tags or []),
                 metadata=document_record_metadata(document.retain_params, None),

@@ -224,6 +224,40 @@ async def test_import_filters_degenerate_fact_without_shifting_archive_ordinals(
 
 @pytest.mark.asyncio
 @pytest.mark.memory_backend_incompatible
+async def test_import_deduplicates_legacy_and_escaped_chunk_rows(memory, request_context):
+    """An archive spanning the chunk-id migration may contain one logical chunk twice."""
+    dst = _unique_bank("transfer_duplicate_chunks")
+    document_id = "legacy_doc_id"
+    document = TransferDocument(
+        id=document_id,
+        original_text="A document retained across the chunk-id migration.",
+        chunks=[
+            TransferChunk(chunk_index=0, chunk_text="legacy chunk text"),
+            TransferChunk(chunk_index=0, chunk_text="new chunk text"),
+        ],
+        facts=[TransferFact(text="The imported fact", fact_type="world", chunk_index=0)],
+    )
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr("manifest.json", TransferManifest(source_bank_id="source", document_count=1).model_dump_json())
+        archive.writestr("documents/000000.json", document.model_dump_json())
+
+    try:
+        result = await _import(memory, dst, archive_buffer.getvalue(), request_context)
+        assert result["documents_imported"] == 1
+        assert result["facts_imported"] == 1
+
+        chunks = await memory.list_document_chunks(dst, document_id, limit=10, request_context=request_context)
+        assert [(chunk["chunk_index"], chunk["chunk_text"]) for chunk in chunks["items"]] == [(0, "new chunk text")]
+
+        units = await memory.list_memory_units(dst, fact_type="world", limit=10, request_context=request_context)
+        assert units["items"][0]["chunk_id"] == build_chunk_id(dst, document_id, 0)
+    finally:
+        await memory.delete_bank(dst, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
 async def test_documents_written_in_one_batch_keep_their_own_facts_chunks_and_causal_links(memory, request_context):
     """Several documents share one write; each fact must still land on its own document.
 
