@@ -196,6 +196,83 @@ describe("readClaudeTranscript", () => {
     expect(result[0].content).toBe("now add the retry backoff");
   });
 
+  it("keeps human queued commands in transcript order and drops non-human queued commands", () => {
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "user",
+          timestamp: "2026-01-01T00:00:00Z",
+          message: { role: "user", content: "start the migration" },
+        }),
+        JSON.stringify({
+          type: "attachment",
+          timestamp: "2026-01-01T00:00:01Z",
+          attachment: {
+            type: "queued_command",
+            prompt: "preserve the legacy index too",
+            origin: { kind: "human" },
+            commandMode: "prompt",
+          },
+        }),
+        JSON.stringify({
+          type: "attachment",
+          timestamp: "2026-01-01T00:00:02Z",
+          attachment: {
+            type: "queued_command",
+            prompt: "background task finished",
+            origin: { kind: "task-notification" },
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-01-01T00:00:03Z",
+          message: { role: "assistant", content: "Both indexes are preserved." },
+        }),
+      ].join("\n")
+    );
+
+    expect(readClaudeTranscript(file)).toEqual([
+      { role: "user", content: "start the migration", timestamp: "2026-01-01T00:00:00Z" },
+      {
+        role: "user",
+        content: "preserve the legacy index too",
+        timestamp: "2026-01-01T00:00:01Z",
+      },
+      {
+        role: "assistant",
+        content: "Both indexes are preserved.",
+        timestamp: "2026-01-01T00:00:03Z",
+      },
+    ]);
+  });
+
+  it("drops empty or malformed human queued commands and strips injected memory from their text", () => {
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "attachment",
+          attachment: {
+            type: "queued_command",
+            prompt: "<hindsight_memories>old fact</hindsight_memories>\nuse the new schema",
+            origin: { kind: "human" },
+          },
+        }),
+        JSON.stringify({
+          type: "attachment",
+          attachment: { type: "queued_command", prompt: "   ", origin: { kind: "human" } },
+        }),
+        JSON.stringify({
+          type: "attachment",
+          attachment: { type: "queued_command", prompt: 42, origin: { kind: "human" } },
+        }),
+      ].join("\n")
+    );
+
+    expect(readClaudeTranscript(file)).toEqual([{ role: "user", content: "use the new schema" }]);
+  });
+
   it("drops a <task-notification>: the harness's background-task plumbing, not the user's words", () => {
     // Claude Code delivers these as an ordinary type:"user" message with a string body and no
     // isMeta flag, so nothing else filters them and extraction saw task ids and status lines as

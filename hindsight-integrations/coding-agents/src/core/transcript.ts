@@ -35,6 +35,13 @@ interface TranscriptLine {
   message?: {
     content?: string | ContentBlock[];
   };
+  attachment?: {
+    type?: string;
+    prompt?: string;
+    origin?: {
+      kind?: string;
+    };
+  };
 }
 
 interface RenderedLine {
@@ -93,6 +100,22 @@ export function readClaudeTranscript(path: string): TransportTurn[] {
     // guard here so a corrupt/truncated line can't reach a property access below and throw.
     if (typeof parsed !== "object" || parsed === null) continue;
     const line = parsed as TranscriptLine;
+
+    // Messages entered while Claude Code is busy are recorded as queued-command attachments,
+    // not as ordinary user lines. Keep only commands that came directly from the human; task
+    // notifications and other harness-originated queued commands are runtime plumbing.
+    if (
+      line.type === "attachment" &&
+      line.attachment?.type === "queued_command" &&
+      line.attachment.origin?.kind === "human"
+    ) {
+      for (const rendered of renderLine(line.attachment.prompt, "user")) {
+        const turn: TransportTurn = { role: rendered.role, content: rendered.content };
+        if (typeof line.timestamp === "string") turn.timestamp = line.timestamp;
+        turns.push(turn);
+      }
+      continue;
+    }
 
     if (line.type !== "user" && line.type !== "assistant") continue;
     if (line.isMeta === true) continue;
