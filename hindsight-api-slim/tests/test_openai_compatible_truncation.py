@@ -38,12 +38,12 @@ def _make_llm() -> OpenAICompatibleLLM:
     )
 
 
-def _response(content: str, finish_reason: str) -> types.SimpleNamespace:
+def _response(content: str, finish_reason: str, *, tool_calls=None, refusal=None) -> types.SimpleNamespace:
     return types.SimpleNamespace(
         choices=[
             types.SimpleNamespace(
                 finish_reason=finish_reason,
-                message=types.SimpleNamespace(content=content, tool_calls=None, refusal=None),
+                message=types.SimpleNamespace(content=content, tool_calls=tool_calls, refusal=refusal),
             )
         ],
         usage=types.SimpleNamespace(prompt_tokens=800, completion_tokens=4096, total_tokens=4896),
@@ -152,6 +152,48 @@ def test_content_or_error_still_raises_provider_error_on_empty_content_without_t
 
     assert excinfo.value.retryable is True
     assert "empty message content" in str(excinfo.value)
+
+
+def test_content_or_error_normalizes_one_native_tool_call_with_empty_content():
+    content, choice = _content_or_error(
+        _response(
+            "",
+            "tool_calls",
+            tool_calls=[
+                types.SimpleNamespace(function=types.SimpleNamespace(name="recall", arguments='{"query":"deployment"}'))
+            ],
+        ),
+        provider="openai",
+        model="deepseek-chat",
+        scope="reflect_tool_call",
+    )
+
+    assert content == '{"call": {"name": "recall", "arguments": {"query": "deployment"}}}'
+    assert choice.finish_reason == "tool_calls"
+
+
+@pytest.mark.parametrize(
+    "tool_calls, refusal",
+    [
+        ([], None),
+        (
+            [
+                {"function": {"name": "recall", "arguments": "{}"}},
+                {"function": {"name": "done", "arguments": "{}"}},
+            ],
+            None,
+        ),
+        ([{"function": {"name": "recall", "arguments": "{}"}}], "request refused"),
+    ],
+)
+def test_content_or_error_rejects_ambiguous_or_refused_native_tool_calls(tool_calls, refusal):
+    with pytest.raises(ProviderResponseError):
+        _content_or_error(
+            _response("", "tool_calls", tool_calls=tool_calls, refusal=refusal),
+            provider="openai",
+            model="deepseek-chat",
+            scope="reflect_tool_call",
+        )
 
 
 @pytest.mark.asyncio

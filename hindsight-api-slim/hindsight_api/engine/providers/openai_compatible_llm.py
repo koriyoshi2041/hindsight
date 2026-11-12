@@ -337,6 +337,38 @@ def _message_refusal(message: Any) -> Any:
     return _response_get(message, "refusal")
 
 
+def _native_tool_call_content(message: Any) -> str | None:
+    """Translate one native tool call into the schema-backed reply shape.
+
+    Hindsight does not send native tools, but some OpenAI-compatible models infer
+    them from the textual declarations and answer with ``tool_calls`` anyway. A
+    single complete call has the same meaning as the JSON reply requested by
+    ``tools_via_schema``. Multiple calls stay an error: the turn explicitly asks
+    for exactly one, so silently dropping all but the first would change intent.
+    """
+    tool_calls = _message_tool_calls(message)
+    refusal = _message_refusal(message)
+    if refusal or not isinstance(tool_calls, (list, tuple)) or len(tool_calls) != 1:
+        return None
+
+    function = _response_get(tool_calls[0], "function")
+    name = _response_get(function, "name")
+    raw_arguments = _response_get(function, "arguments")
+    if not isinstance(name, str) or not name:
+        return None
+
+    if isinstance(raw_arguments, str):
+        try:
+            arguments = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            arguments = {"_raw": raw_arguments}
+    else:
+        arguments = raw_arguments
+    if not isinstance(arguments, dict):
+        arguments = {"_raw": raw_arguments}
+    return json.dumps({"call": {"name": name, "arguments": arguments}})
+
+
 def _served_by(response: Any) -> str | None:
     """The upstream a gateway such as OpenRouter served the call from, when it says."""
     served_by = _response_get(response, "provider")
@@ -475,6 +507,9 @@ def _content_or_error(response: Any, *, provider: str, model: str, scope: str) -
 
     content = _message_content(message)
     if content is None or content == "":
+        native_tool_content = _native_tool_call_content(message)
+        if native_tool_content is not None:
+            return native_tool_content, choice
         tool_calls = _message_tool_calls(message)
         refusal = _message_refusal(message)
         retryable = finish_reason not in {"content_filter"}
