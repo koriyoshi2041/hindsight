@@ -16,6 +16,8 @@ from hindsight_api.engine.retain.fact_extraction import extract_facts_from_text
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+pytestmark = pytest.mark.hs_llm_core
+
 
 @pytest.fixture
 def llm_config():
