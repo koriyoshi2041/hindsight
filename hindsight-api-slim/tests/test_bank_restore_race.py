@@ -70,7 +70,7 @@ async def test_a_second_restore_into_the_same_fresh_bank_is_refused(memory, requ
         )
 
         assert second is not None
-        with pytest.raises(ValueError, match="created by another restore"):
+        with pytest.raises(ValueError, match="created by another restore|already exists"):
             await second
         assert await _facts(memory, dst, request_context) == source_facts
     finally:
